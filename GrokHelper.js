@@ -324,6 +324,12 @@
                 ids.push(...collectResponseIds(child));
             }
         }
+        // response-node API 返回 { responseNodes: [...] }
+        if (Array.isArray(node.responseNodes)) {
+            for (const child of node.responseNodes) {
+                ids.push(...collectResponseIds(child));
+            }
+        }
         return ids;
     }
 
