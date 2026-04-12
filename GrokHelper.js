@@ -493,15 +493,14 @@
             if (!result) return;
             const { convId, allSearchResults } = result;
 
-            const rows = [['responseId', 'title', 'url', 'snippet', 'domain'].join(',')];
+            const rows = [['responseId', 'title', 'url', 'preview'].join(',')];
             for (const item of allSearchResults) {
                 for (const sr of item.webSearchResults) {
                     rows.push([
                         escapeCsv(item.responseId),
                         escapeCsv(sr.title),
                         escapeCsv(sr.url),
-                        escapeCsv(sr.snippet || sr.description || sr.text || ''),
-                        escapeCsv(sr.domain || sr.displayUrl || '')
+                        escapeCsv(sr.preview || sr.snippet || '')
                     ].join(','));
                 }
             }
