@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Helper
 // @namespace    https://github.com/BlueSkyXN/Grok-Super-Search
-// @version      2.0.0
+// @version      2.1.0
 // @author       BlueSkyXN
 // @description  Monitor Grok rate limits (Fast/Expert/Heavy) + Export webSearchResults as JSON
 // @match        https://grok.com/*
