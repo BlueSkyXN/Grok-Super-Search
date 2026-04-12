@@ -96,19 +96,40 @@
             margin: 2px 0;
             width: 100%;
         }
-        .grok-monitor-btn {
-            padding: 4px 10px;
+        .grok-monitor-btn-group {
+            display: flex;
+            gap: 0;
+            margin-top: 4px;
+            width: 100%;
+        }
+        .grok-monitor-btn-label {
+            padding: 5px 10px;
+            background: #e8e8e8;
+            color: #555;
+            font-size: 12px;
+            font-weight: 600;
             border: 1px solid #ccc;
-            border-radius: 4px;
-            background: #f5f5f5;
+            border-right: none;
+            border-radius: 6px 0 0 6px;
+            white-space: nowrap;
+            line-height: 1;
+        }
+        .grok-monitor-btn {
+            padding: 5px 12px;
+            border: 1px solid #ccc;
+            border-radius: 0;
+            background: linear-gradient(to bottom, #fafafa, #f0f0f0);
             color: #333;
             font-size: 12px;
+            font-weight: 500;
             cursor: pointer;
             white-space: nowrap;
-            transition: background 0.15s;
+            transition: all 0.15s;
+            line-height: 1;
         }
-        .grok-monitor-btn:hover { background: #e0e0e0; }
-        .grok-monitor-btn:active { background: #d0d0d0; }
+        .grok-monitor-btn:last-child { border-radius: 0 6px 6px 0; }
+        .grok-monitor-btn:hover { background: linear-gradient(to bottom, #fff, #e8e8e8); }
+        .grok-monitor-btn:active { background: #ddd; }
         .grok-monitor-btn.loading {
             opacity: 0.6;
             pointer-events: none;
@@ -127,8 +148,9 @@
                 border-color: #666;
             }
             .grok-monitor-separator { border-top-color: #555; }
-            .grok-monitor-btn { background: #444; color: #eee; border-color: #666; }
-            .grok-monitor-btn:hover { background: #555; }
+            .grok-monitor-btn-label { background: #3a3a3a; color: #aaa; border-color: #666; }
+            .grok-monitor-btn { background: linear-gradient(to bottom, #444, #3a3a3a); color: #eee; border-color: #666; }
+            .grok-monitor-btn:hover { background: linear-gradient(to bottom, #555, #444); }
         }
     `);
 
@@ -259,14 +281,30 @@
         monitor.appendChild(summary);
         monitor.appendChild(details);
 
-        // 导出按钮（hover 时显示在详情下方）
-        const exportBtn = document.createElement('button');
-        exportBtn.id = 'grok-export-btn';
-        exportBtn.className = 'grok-monitor-btn';
-        exportBtn.textContent = '导出搜索';
-        exportBtn.title = '导出当前对话的 webSearchResults 为 JSON';
-        exportBtn.addEventListener('click', exportWebSearchResults);
-        details.appendChild(exportBtn);
+        // 导出按钮组（hover 时显示在详情下方）
+        const btnGroup = document.createElement('div');
+        btnGroup.className = 'grok-monitor-btn-group';
+
+        const btnLabel = document.createElement('span');
+        btnLabel.className = 'grok-monitor-btn-label';
+        btnLabel.textContent = '导出';
+
+        const btnJSON = document.createElement('button');
+        btnJSON.className = 'grok-monitor-btn grok-export-btn';
+        btnJSON.textContent = 'JSON';
+        btnJSON.title = '导出 webSearchResults 为 JSON';
+        btnJSON.addEventListener('click', exportAsJSON);
+
+        const btnCSV = document.createElement('button');
+        btnCSV.className = 'grok-monitor-btn grok-export-btn';
+        btnCSV.textContent = 'CSV';
+        btnCSV.title = '导出 webSearchResults 为 CSV';
+        btnCSV.addEventListener('click', exportAsCSV);
+
+        btnGroup.appendChild(btnLabel);
+        btnGroup.appendChild(btnJSON);
+        btnGroup.appendChild(btnCSV);
+        details.appendChild(btnGroup);
 
         document.body.appendChild(monitor);
     }
@@ -344,8 +382,8 @@
         return await resp.json();
     }
 
-    function downloadJSON(data, filename) {
-        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    function downloadFile(content, filename, mimeType) {
+        const blob = new Blob([content], { type: mimeType });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -356,76 +394,125 @@
         URL.revokeObjectURL(url);
     }
 
-    async function exportWebSearchResults() {
+    // 收集搜索结果的通用逻辑
+    async function gatherSearchResults() {
         const convId = getConversationId();
         if (!convId) {
             alert('请先打开一个对话（URL 需包含 /c/{conversationId}）');
-            return;
+            return null;
         }
 
-        const btn = document.getElementById('grok-export-btn');
-        if (btn) { btn.classList.add('loading'); btn.textContent = '导出中...'; }
+        // 1. 获取对话树节点
+        const tree = await fetchResponseNodes(convId);
 
+        // 2. 收集所有 responseId
+        let responseIds = [];
+        if (Array.isArray(tree)) {
+            tree.forEach(n => responseIds.push(...collectResponseIds(n)));
+        } else {
+            responseIds = collectResponseIds(tree);
+        }
+
+        if (responseIds.length === 0) {
+            alert('未找到任何 response 节点');
+            return null;
+        }
+
+        // 3. 加载完整 response 数据
+        const responses = await fetchLoadResponses(convId, responseIds);
+
+        // 4. 提取 webSearchResults
+        const allSearchResults = [];
+        const responseArray = Array.isArray(responses) ? responses : (responses.responses || [responses]);
+
+        for (const r of responseArray) {
+            if (r.webSearchResults && r.webSearchResults.length > 0) {
+                allSearchResults.push({
+                    responseId: r.responseId || r.id || null,
+                    webSearchResults: r.webSearchResults
+                });
+            }
+            if (r.message?.webSearchResults?.length > 0) {
+                allSearchResults.push({
+                    responseId: r.responseId || r.id || null,
+                    webSearchResults: r.message.webSearchResults
+                });
+            }
+        }
+
+        if (allSearchResults.length === 0) {
+            alert('此对话没有 webSearchResults 数据（可能不是搜索模式的对话）');
+            return null;
+        }
+
+        return { convId, responseIds, allSearchResults };
+    }
+
+    function setExportLoading(loading) {
+        const btns = document.querySelectorAll('.grok-export-btn');
+        btns.forEach(b => {
+            if (loading) { b.classList.add('loading'); }
+            else { b.classList.remove('loading'); }
+        });
+    }
+
+    async function exportAsJSON() {
+        setExportLoading(true);
         try {
-            // 1. 获取对话树节点
-            const tree = await fetchResponseNodes(convId);
-
-            // 2. 收集所有 responseId
-            let responseIds = [];
-            if (Array.isArray(tree)) {
-                tree.forEach(n => responseIds.push(...collectResponseIds(n)));
-            } else {
-                responseIds = collectResponseIds(tree);
-            }
-
-            if (responseIds.length === 0) {
-                alert('未找到任何 response 节点');
-                return;
-            }
-
-            // 3. 加载完整 response 数据
-            const responses = await fetchLoadResponses(convId, responseIds);
-
-            // 4. 提取 webSearchResults
-            const allSearchResults = [];
-            const responseArray = Array.isArray(responses) ? responses : (responses.responses || [responses]);
-
-            for (const r of responseArray) {
-                if (r.webSearchResults && r.webSearchResults.length > 0) {
-                    allSearchResults.push({
-                        responseId: r.responseId || r.id || null,
-                        webSearchResults: r.webSearchResults
-                    });
-                }
-                // 有些嵌套在 message 里
-                if (r.message?.webSearchResults?.length > 0) {
-                    allSearchResults.push({
-                        responseId: r.responseId || r.id || null,
-                        webSearchResults: r.message.webSearchResults
-                    });
-                }
-            }
-
-            if (allSearchResults.length === 0) {
-                alert('此对话没有 webSearchResults 数据（可能不是搜索模式的对话）');
-                return;
-            }
-
-            // 5. 下载 JSON
+            const result = await gatherSearchResults();
+            if (!result) return;
+            const { convId, responseIds, allSearchResults } = result;
             const filename = `grok-search-${convId.slice(0, 8)}-${Date.now()}.json`;
-            downloadJSON({
+            downloadFile(JSON.stringify({
                 conversationId: convId,
                 exportTime: new Date().toISOString(),
                 totalResponses: responseIds.length,
                 searchResultCount: allSearchResults.length,
                 data: allSearchResults
-            }, filename);
-
+            }, null, 2), filename, 'application/json');
         } catch (e) {
-            console.error('Export failed:', e);
+            console.error('Export JSON failed:', e);
             alert('导出失败: ' + e.message);
         } finally {
-            if (btn) { btn.classList.remove('loading'); btn.textContent = '导出搜索'; }
+            setExportLoading(false);
+        }
+    }
+
+    function escapeCsv(val) {
+        const s = String(val ?? '');
+        if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+            return '"' + s.replace(/"/g, '""') + '"';
+        }
+        return s;
+    }
+
+    async function exportAsCSV() {
+        setExportLoading(true);
+        try {
+            const result = await gatherSearchResults();
+            if (!result) return;
+            const { convId, allSearchResults } = result;
+
+            const rows = [['responseId', 'title', 'url', 'snippet', 'domain'].join(',')];
+            for (const item of allSearchResults) {
+                for (const sr of item.webSearchResults) {
+                    rows.push([
+                        escapeCsv(item.responseId),
+                        escapeCsv(sr.title),
+                        escapeCsv(sr.url),
+                        escapeCsv(sr.snippet || sr.description || sr.text || ''),
+                        escapeCsv(sr.domain || sr.displayUrl || '')
+                    ].join(','));
+                }
+            }
+
+            const filename = `grok-search-${convId.slice(0, 8)}-${Date.now()}.csv`;
+            downloadFile('\uFEFF' + rows.join('\n'), filename, 'text/csv;charset=utf-8');
+        } catch (e) {
+            console.error('Export CSV failed:', e);
+            alert('导出失败: ' + e.message);
+        } finally {
+            setExportLoading(false);
         }
     }
 
