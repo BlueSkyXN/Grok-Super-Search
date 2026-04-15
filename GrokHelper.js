@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Helper
 // @namespace    https://github.com/BlueSkyXN/Grok-Super-Search
-// @version      2.1.0
+// @version      2.1.1
 // @author       BlueSkyXN
 // @description  Monitor Grok rate limits (Fast/Expert/Heavy) + Export webSearchResults as JSON
 // @match        https://grok.com/*
@@ -341,8 +341,16 @@
     // ========== 导出 webSearchResults ==========
 
     function getConversationId() {
-        const match = window.location.pathname.match(/^\/c\/([a-f0-9-]+)/);
-        return match ? match[1] : null;
+        // 形式 1：独立对话 /c/{conversationId}
+        const m1 = window.location.pathname.match(/^\/c\/([a-f0-9-]+)/i);
+        if (m1) return m1[1];
+
+        // 形式 2：Project 内对话 /project/{projectId}?chat={conversationId}&rid=...
+        if (/^\/project\//i.test(window.location.pathname)) {
+            const chat = new URLSearchParams(window.location.search).get('chat');
+            if (chat && /^[a-f0-9-]+$/i.test(chat)) return chat;
+        }
+        return null;
     }
 
     async function fetchResponseNodes(convId) {
@@ -398,7 +406,7 @@
     async function gatherSearchResults() {
         const convId = getConversationId();
         if (!convId) {
-            alert('请先打开一个对话（URL 需包含 /c/{conversationId}）');
+            alert('请先打开一个对话（URL 需为 /c/{id} 或 /project/{id}?chat={id}）');
             return null;
         }
 
