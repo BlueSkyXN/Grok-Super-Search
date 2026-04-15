@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Helper
 // @namespace    https://github.com/BlueSkyXN/Grok-Super-Search
-// @version      2.1.1
+// @version      2.1.2
 // @author       BlueSkyXN
 // @description  Monitor Grok rate limits (Fast/Expert/Heavy) + Export webSearchResults as JSON
 // @match        https://grok.com/*
@@ -429,24 +429,29 @@
         // 3. 加载完整 response 数据
         const responses = await fetchLoadResponses(convId, responseIds);
 
-        // 4. 提取 webSearchResults
+        // turn 按 responseIds 收集顺序编号（从 1 起），load-responses 返回顺序不一定和收集顺序一致
+        const turnMap = new Map();
+        responseIds.forEach((id, idx) => turnMap.set(id, idx + 1));
+
+        // 4. 提取 webSearchResults（两路择一，避免同一 response 被 push 两次）
         const allSearchResults = [];
         const responseArray = Array.isArray(responses) ? responses : (responses.responses || [responses]);
 
         for (const r of responseArray) {
-            if (r.webSearchResults && r.webSearchResults.length > 0) {
-                allSearchResults.push({
-                    responseId: r.responseId || r.id || null,
-                    webSearchResults: r.webSearchResults
-                });
-            }
-            if (r.message?.webSearchResults?.length > 0) {
-                allSearchResults.push({
-                    responseId: r.responseId || r.id || null,
-                    webSearchResults: r.message.webSearchResults
-                });
-            }
+            const results = (r.webSearchResults?.length ? r.webSearchResults
+                : r.message?.webSearchResults?.length ? r.message.webSearchResults
+                : null);
+            if (!results) continue;
+            const responseId = r.responseId || r.id || null;
+            allSearchResults.push({
+                turn: turnMap.get(responseId) ?? null,
+                responseId,
+                webSearchResults: results
+            });
         }
+
+        // 按 turn 升序，让多轮对话的结果有稳定、可读的顺序
+        allSearchResults.sort((a, b) => (a.turn ?? Infinity) - (b.turn ?? Infinity));
 
         if (allSearchResults.length === 0) {
             alert('此对话没有 webSearchResults 数据（可能不是搜索模式的对话）');
@@ -501,10 +506,12 @@
             if (!result) return;
             const { convId, allSearchResults } = result;
 
-            const rows = [['title', 'url', 'preview'].join(',')];
+            const rows = [['turn', 'responseId', 'title', 'url', 'preview'].join(',')];
             for (const item of allSearchResults) {
                 for (const sr of item.webSearchResults) {
                     rows.push([
+                        escapeCsv(item.turn ?? ''),
+                        escapeCsv(item.responseId ?? ''),
                         escapeCsv(sr.title),
                         escapeCsv(sr.url),
                         escapeCsv(sr.preview || sr.snippet || '')
