@@ -346,7 +346,7 @@ async def query_rate_limits(
         total_remaining += v.get("remaining", 0)
 
     return {
-        "token_prefix": token_slot.token[:8] + "...",
+        "token_prefix": token_slot.token[:4] + "...",
         "total_remaining": total_remaining,
         "limits": results,
     }

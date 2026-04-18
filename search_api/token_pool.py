@@ -48,12 +48,18 @@ class TokenPool:
     def available(self) -> int:
         return sum(1 for s in self._slots if not s.disabled)
 
+    def get_slot_by_index(self, index: int) -> TokenSlot | None:
+        """按索引获取 Token slot（用于指定 Token 查询额度等）"""
+        if 0 <= index < len(self._slots):
+            return self._slots[index]
+        return None
+
     def status(self) -> list[dict]:
         """返回所有 Token 状态（脱敏）"""
         return [
             {
                 "index": i,
-                "token_prefix": s.token[:8] + "..." if len(s.token) > 8 else "***",
+                "token_prefix": s.token[:4] + "..." if len(s.token) > 4 else "***",
                 "in_flight": s.in_flight,
                 "total_used": s.total_used,
                 "total_errors": s.total_errors,

@@ -366,9 +366,8 @@ async def check_quota(
         slots = pool.status()
         if token_index < 0 or token_index >= len(slots):
             raise HTTPException(400, f"无效的 token_index: {token_index}")
-        # 获取指定 slot
-        slot = pool._slots[token_index]
-        if slot.disabled:
+        slot = pool.get_slot_by_index(token_index)
+        if slot is None or slot.disabled:
             raise HTTPException(400, f"Token #{token_index} 已禁用")
     else:
         slot = await pool.acquire()

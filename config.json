@@ -1,0 +1,53 @@
+{
+  "_comment": "Grok Search API 配置文件。Token 等敏感信息请放在 .env 中。",
+  "default_mode": "auto",
+  "default_prompt_id": "default",
+  "temporary": true,
+  "timeout": 120,
+  "cooldown": 3,
+  "http_backend": "httpx",
+  "prompt_templates": [
+    {
+      "id": "default",
+      "name": "默认搜索",
+      "description": "简单搜索，适合快速查询",
+      "template": "请搜索以下内容并给出详细的搜索结果：\n\n{query}",
+      "mode": "auto"
+    },
+    {
+      "id": "deep_research",
+      "name": "深度调研",
+      "description": "300 子话题裂变，获取海量搜索结果",
+      "template": "我要全面调研接下来的信息，需要你帮助我搜索。请你列出与此主题相关的 300个子话题/角度/关键问题/关键词组合，每次搜索30个信息，分别调用一次搜索工具搜索，没有完成300次搜索就不要暂停。你需要先搜索，再回答，回答时不需要总结搜索结果，只需要告诉我搜索思路。目标是获取尽可能多的搜索结果数据。\n\n调研主题：{query}",
+      "mode": "expert"
+    },
+    {
+      "id": "multi_angle",
+      "name": "多角度裂变",
+      "description": "50 子话题自动裂变搜索",
+      "template": "我要全面调研 \"{query}\"。请你：\n1. 首先列出与此主题相关的 50 个子话题/角度/关键问题\n2. 然后对每个子话题分别调用一次搜索工具搜索\n不需要总结搜索结果。目标是获取尽可能多的搜索结果数据。",
+      "mode": "expert"
+    },
+    {
+      "id": "topic_scan",
+      "name": "主题扫描",
+      "description": "围绕主题展开 N 次搜索",
+      "template": "围绕主题展开30次搜索，全面调查 \"{query}\" 的各方面信息。\n不需要总结搜索结果，不需要访问搜索内容，只执行搜索。\n完成后告诉我搜索了几次。",
+      "mode": "expert"
+    },
+    {
+      "id": "question_matrix",
+      "name": "问题矩阵",
+      "description": "20 种问句模式搜索",
+      "template": "请对 \"{query}\" 分别用以下问句搜索（每种问法搜一次）：\n\"{query} 是什么\", \"{query} 怎么用\", \"{query} 优缺点\",\n\"{query} 对比\", \"{query} 替代方案\", \"{query} 最新进展\",\n\"{query} 价格\", \"{query} 教程\", \"{query} 案例\",\n\"{query} 评测\", \"{query} 排行\", \"{query} 趋势\",\n\"{query} 问题\", \"{query} 解决方案\", \"{query} 原理\",\n\"{query} 历史\", \"{query} 未来\", \"{query} 应用场景\",\n\"{query} 行业报告\", \"{query} 论文\"\n（共20次搜索）不总结，只搜索。",
+      "mode": "expert"
+    },
+    {
+      "id": "site_sweep",
+      "name": "站点遍历",
+      "description": "在 18 个主流网站逐一搜索",
+      "template": "请对主题 \"{query}\" 在以下每个网站上搜索一次：\nsite:zhihu.com, site:weibo.com, site:douban.com, site:bilibili.com,\nsite:baidu.com, site:36kr.com, site:huxiu.com, site:juejin.cn,\nsite:csdn.net, site:cnblogs.com, site:reddit.com, site:twitter.com,\nsite:youtube.com, site:medium.com, site:github.com, site:stackoverflow.com,\nsite:wikipedia.org, site:arxiv.org\n（共18次搜索）\n搜索格式：{query} site:[域名]\n只执行搜索，不总结。",
+      "mode": "expert"
+    }
+  ]
+}
