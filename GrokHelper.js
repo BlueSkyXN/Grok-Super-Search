@@ -29,9 +29,14 @@
     const CONVERSATION_ID_RE = /^[a-f0-9]+(?:-[a-f0-9]+)*$/i;
     const MAX_ERROR_RESPONSE_LENGTH = 300;
     const SEARCH_API_VERSION = '2.2.0';
+    const DEFAULT_API_CREDENTIALS = 'omit';
 
-    function isValidConversationId(id) {
+    function hasValidConversationIdFormat(id) {
         return typeof id === 'string' && CONVERSATION_ID_RE.test(id);
+    }
+
+    function truncateText(text, maxLength) {
+        return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
     }
 
     // ========== 样式 ==========
@@ -358,12 +363,12 @@
     function getConversationId() {
         // 形式 1：独立对话 /c/{conversationId}
         const m1 = window.location.pathname.match(/^\/c\/([^/]+)/i);
-        if (m1 && isValidConversationId(m1[1])) return m1[1];
+        if (m1 && hasValidConversationIdFormat(m1[1])) return m1[1];
 
         // 形式 2：Project 内对话 /project/{projectId}?chat={conversationId}&rid=...
         if (/^\/project\//i.test(window.location.pathname)) {
             const chat = new URLSearchParams(window.location.search).get('chat');
-            if (isValidConversationId(chat)) return chat;
+            if (hasValidConversationIdFormat(chat)) return chat;
         }
         return null;
     }
@@ -468,7 +473,7 @@
 
     async function postSearchPayload(endpoint, payload, options = {}) {
         const target = normalizeApiEndpoint(endpoint);
-        const credentials = options.credentials || 'omit';
+        const credentials = options.credentials || DEFAULT_API_CREDENTIALS;
         const resp = await fetch(target, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -477,7 +482,7 @@
         });
         const text = await resp.text();
         if (!resp.ok) {
-            const snippet = text.length > MAX_ERROR_RESPONSE_LENGTH ? `${text.slice(0, MAX_ERROR_RESPONSE_LENGTH)}...` : text;
+            const snippet = truncateText(text, MAX_ERROR_RESPONSE_LENGTH);
             throw new Error(`API POST failed: ${resp.status} ${snippet}`);
         }
         return { status: resp.status, body: text };
@@ -539,6 +544,7 @@
             const responseId = r.responseId || r.id || null;
             const normalized = results
                 .map(normalizeSearchResult)
+                // Require URL or title so empty tool traces are not exported as search items.
                 .filter(sr => sr && (sr.url || sr.title));
             allSearchResults.push({
                 turn: turnMap.get(responseId) ?? null,
@@ -577,7 +583,7 @@
             const filename = `grok-search-${convId.slice(0, 8)}-${Date.now()}.json`;
             downloadFile(JSON.stringify({
                 ...payload,
-                // 兼容旧版导出字段
+                // Backward compatibility with legacy export fields.
                 data: allSearchResults
             }, null, 2), filename, 'application/json');
         } catch (e) {
@@ -638,7 +644,7 @@
             if (!target) return;
             localStorage.setItem(API_ENDPOINT_STORAGE_KEY, target);
             const payload = buildSearchApiPayload(result);
-            const resp = await postSearchPayload(target, payload, { credentials: 'omit' });
+            const resp = await postSearchPayload(target, payload, { credentials: DEFAULT_API_CREDENTIALS });
             alert(`已推送到 API：${resp.status}`);
         } catch (e) {
             console.error('Export API failed:', e);
@@ -653,7 +659,7 @@
             version: SEARCH_API_VERSION,
             getCurrentConversation: async () => gatherSearchResults({ silent: true }),
             getConversationById: async (conversationId) => {
-                if (!isValidConversationId(conversationId)) {
+                if (!hasValidConversationIdFormat(conversationId)) {
                     throw new Error('invalid conversationId');
                 }
                 return await gatherSearchResults({ conversationId, silent: true });
