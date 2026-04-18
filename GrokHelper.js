@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Grok Helper
 // @namespace    https://github.com/BlueSkyXN/Grok-Super-Search
-// @version      2.1.2
+// @version      2.2.0
 // @author       BlueSkyXN
-// @description  Monitor Grok rate limits (Fast/Expert/Heavy) + Export webSearchResults as JSON
+// @description  Monitor Grok rate limits + Export webSearchResults (JSON/CSV/API)
 // @match        https://grok.com/*
 // @grant        GM_addStyle
 // @supportURL   https://github.com/BlueSkyXN/Grok-Super-Search
@@ -25,6 +25,7 @@
         { key: 'expert',  label: 'Expert',  modelName: 'expert',  requestKind: 'DEFAULT' },
         { key: 'heavy',   label: 'Heavy',   modelName: 'heavy',   requestKind: 'DEFAULT' },
     ];
+    const API_ENDPOINT_STORAGE_KEY = 'grok-search-api-endpoint';
 
     // ========== 样式 ==========
 
@@ -301,9 +302,16 @@
         btnCSV.title = '导出 webSearchResults 为 CSV';
         btnCSV.addEventListener('click', exportAsCSV);
 
+        const btnAPI = document.createElement('button');
+        btnAPI.className = 'grok-monitor-btn grok-export-btn';
+        btnAPI.textContent = 'API';
+        btnAPI.title = '导出并 POST 到搜索 API';
+        btnAPI.addEventListener('click', exportAsAPI);
+
         btnGroup.appendChild(btnLabel);
         btnGroup.appendChild(btnJSON);
         btnGroup.appendChild(btnCSV);
+        btnGroup.appendChild(btnAPI);
         details.appendChild(btnGroup);
 
         document.body.appendChild(monitor);
@@ -390,6 +398,66 @@
         return await resp.json();
     }
 
+    function normalizeSearchResult(sr) {
+        if (!sr || typeof sr !== 'object') return null;
+        const title = sr.title || sr.name || sr.headline || '';
+        const url = sr.url || sr.link || sr.href || '';
+        const preview = sr.preview || sr.snippet || sr.description || '';
+        const source = sr.site || sr.domain || sr.source || '';
+        const publishedTime = sr.publishedTime || sr.publishedDate || sr.time || '';
+        return {
+            title: String(title || ''),
+            url: String(url || ''),
+            preview: String(preview || ''),
+            source: String(source || ''),
+            publishedTime: String(publishedTime || ''),
+            raw: sr
+        };
+    }
+
+    function buildSearchApiPayload(result) {
+        const { convId, responseIds, allSearchResults } = result;
+        const items = [];
+        for (const item of allSearchResults) {
+            item.searchResults.forEach((sr, idx) => {
+                items.push({
+                    conversationId: convId,
+                    turn: item.turn,
+                    responseId: item.responseId,
+                    rank: idx + 1,
+                    ...sr
+                });
+            });
+        }
+        return {
+            conversationId: convId,
+            exportTime: new Date().toISOString(),
+            totalResponses: responseIds.length,
+            searchTurnCount: allSearchResults.length,
+            searchResultCount: items.length,
+            turns: allSearchResults.map(item => ({
+                turn: item.turn,
+                responseId: item.responseId,
+                searchResults: item.searchResults
+            })),
+            items
+        };
+    }
+
+    async function postSearchPayload(endpoint, payload) {
+        const resp = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            credentials: 'omit'
+        });
+        const text = await resp.text();
+        if (!resp.ok) {
+            throw new Error(`API POST failed: ${resp.status} ${text.slice(0, 300)}`);
+        }
+        return { status: resp.status, body: text };
+    }
+
     function downloadFile(content, filename, mimeType) {
         const blob = new Blob([content], { type: mimeType });
         const url = URL.createObjectURL(blob);
@@ -403,10 +471,11 @@
     }
 
     // 收集搜索结果的通用逻辑
-    async function gatherSearchResults() {
-        const convId = getConversationId();
+    async function gatherSearchResults(options = {}) {
+        const { conversationId = null, silent = false } = options;
+        const convId = conversationId || getConversationId();
         if (!convId) {
-            alert('请先打开一个对话（URL 需为 /c/{id} 或 /project/{id}?chat={id}）');
+            if (!silent) alert('请先打开一个对话（URL 需为 /c/{id} 或 /project/{id}?chat={id}）');
             return null;
         }
 
@@ -422,7 +491,7 @@
         }
 
         if (responseIds.length === 0) {
-            alert('未找到任何 response 节点');
+            if (!silent) alert('未找到任何 response 节点');
             return null;
         }
 
@@ -443,10 +512,14 @@
                 : null);
             if (!results) continue;
             const responseId = r.responseId || r.id || null;
+            const normalized = results
+                .map(normalizeSearchResult)
+                .filter(sr => sr && (sr.url || sr.title || sr.preview));
             allSearchResults.push({
                 turn: turnMap.get(responseId) ?? null,
                 responseId,
-                webSearchResults: results
+                webSearchResults: results,
+                searchResults: normalized
             });
         }
 
@@ -454,7 +527,7 @@
         allSearchResults.sort((a, b) => (a.turn ?? Infinity) - (b.turn ?? Infinity));
 
         if (allSearchResults.length === 0) {
-            alert('此对话没有 webSearchResults 数据（可能不是搜索模式的对话）');
+            if (!silent) alert('此对话没有 webSearchResults 数据（可能不是搜索模式的对话）');
             return null;
         }
 
@@ -474,14 +547,15 @@
         try {
             const result = await gatherSearchResults();
             if (!result) return;
+            const payload = buildSearchApiPayload(result);
             const { convId, responseIds, allSearchResults } = result;
             const filename = `grok-search-${convId.slice(0, 8)}-${Date.now()}.json`;
             downloadFile(JSON.stringify({
-                conversationId: convId,
-                exportTime: new Date().toISOString(),
-                totalResponses: responseIds.length,
-                searchResultCount: allSearchResults.length,
-                data: allSearchResults
+                ...payload,
+                // 兼容旧版导出字段
+                data: allSearchResults,
+                legacySearchTurnCount: allSearchResults.length,
+                totalResponses: responseIds.length
             }, null, 2), filename, 'application/json');
         } catch (e) {
             console.error('Export JSON failed:', e);
@@ -508,13 +582,13 @@
 
             const rows = [['turn', 'responseId', 'title', 'url', 'preview'].join(',')];
             for (const item of allSearchResults) {
-                for (const sr of item.webSearchResults) {
+                for (const sr of item.searchResults) {
                     rows.push([
                         escapeCsv(item.turn ?? ''),
                         escapeCsv(item.responseId ?? ''),
                         escapeCsv(sr.title),
                         escapeCsv(sr.url),
-                        escapeCsv(sr.preview || sr.snippet || '')
+                        escapeCsv(sr.preview)
                     ].join(','));
                 }
             }
@@ -529,6 +603,43 @@
         }
     }
 
+    async function exportAsAPI() {
+        setExportLoading(true);
+        try {
+            const result = await gatherSearchResults();
+            if (!result) return;
+            const lastEndpoint = localStorage.getItem(API_ENDPOINT_STORAGE_KEY) || '';
+            const endpoint = window.prompt('输入搜索 API Endpoint（POST JSON）', lastEndpoint || 'https://example.com/api/search');
+            if (!endpoint) return;
+            const target = endpoint.trim();
+            if (!target) return;
+            localStorage.setItem(API_ENDPOINT_STORAGE_KEY, target);
+            const payload = buildSearchApiPayload(result);
+            const resp = await postSearchPayload(target, payload);
+            alert(`已推送到 API：${resp.status}`);
+        } catch (e) {
+            console.error('Export API failed:', e);
+            alert('导出到 API 失败: ' + e.message);
+        } finally {
+            setExportLoading(false);
+        }
+    }
+
+    function exposeSearchAPI() {
+        window.GrokSearchAPI = {
+            version: '1.0.0',
+            getCurrentConversation: async () => await gatherSearchResults({ silent: true }),
+            getConversationById: async (conversationId) => {
+                if (!conversationId || !/^[a-f0-9-]+$/i.test(conversationId)) {
+                    throw new Error('invalid conversationId');
+                }
+                return await gatherSearchResults({ conversationId, silent: true });
+            },
+            buildPayload: buildSearchApiPayload,
+            postPayload: postSearchPayload
+        };
+    }
+
     // ========== 主循环 ==========
 
     async function tick() {
@@ -538,6 +649,7 @@
 
     function init() {
         createMonitor();
+        exposeSearchAPI();
         tick();
         setInterval(tick, 30000);
     }
