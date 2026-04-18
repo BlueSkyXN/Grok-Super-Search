@@ -27,6 +27,12 @@
     ];
     const API_ENDPOINT_STORAGE_KEY = 'grok-search-api-endpoint';
     const CONVERSATION_ID_RE = /^[a-f0-9]+(?:-[a-f0-9]+)*$/i;
+    const MAX_ERROR_RESPONSE_LENGTH = 300;
+    const SEARCH_API_VERSION = '2.2.0';
+
+    function isValidConversationId(id) {
+        return typeof id === 'string' && CONVERSATION_ID_RE.test(id);
+    }
 
     // ========== 样式 ==========
 
@@ -350,7 +356,6 @@
     // ========== 导出 webSearchResults ==========
 
     function getConversationId() {
-        const isValidConversationId = id => typeof id === 'string' && CONVERSATION_ID_RE.test(id);
         // 形式 1：独立对话 /c/{conversationId}
         const m1 = window.location.pathname.match(/^\/c\/([^/]+)/i);
         if (m1 && isValidConversationId(m1[1])) return m1[1];
@@ -472,7 +477,7 @@
         });
         const text = await resp.text();
         if (!resp.ok) {
-            const snippet = text.length > 300 ? `${text.slice(0, 300)}...` : text;
+            const snippet = text.length > MAX_ERROR_RESPONSE_LENGTH ? `${text.slice(0, MAX_ERROR_RESPONSE_LENGTH)}...` : text;
             throw new Error(`API POST failed: ${resp.status} ${snippet}`);
         }
         return { status: resp.status, body: text };
@@ -534,7 +539,7 @@
             const responseId = r.responseId || r.id || null;
             const normalized = results
                 .map(normalizeSearchResult)
-                .filter(sr => sr && (sr.url || sr.title || sr.preview));
+                .filter(sr => sr && (sr.url || sr.title));
             allSearchResults.push({
                 turn: turnMap.get(responseId) ?? null,
                 responseId,
@@ -645,10 +650,10 @@
 
     function exposeSearchAPI() {
         window.GrokSearchAPI = {
-            version: '1.0.0',
+            version: SEARCH_API_VERSION,
             getCurrentConversation: async () => gatherSearchResults({ silent: true }),
             getConversationById: async (conversationId) => {
-                if (!conversationId || !CONVERSATION_ID_RE.test(conversationId)) {
+                if (!isValidConversationId(conversationId)) {
                     throw new Error('invalid conversationId');
                 }
                 return await gatherSearchResults({ conversationId, silent: true });
