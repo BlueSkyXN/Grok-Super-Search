@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Grok Helper
 // @namespace    https://github.com/BlueSkyXN/Grok-Super-Search
-// @version      2.2.0
+// @version      2.1.2
 // @author       BlueSkyXN
-// @description  Monitor Grok rate limits + Export webSearchResults (JSON/CSV/API)
+// @description  Monitor Grok rate limits (Fast/Expert/Heavy) + Export webSearchResults as JSON
 // @match        https://grok.com/*
 // @grant        GM_addStyle
 // @supportURL   https://github.com/BlueSkyXN/Grok-Super-Search
@@ -25,25 +25,6 @@
         { key: 'expert',  label: 'Expert',  modelName: 'expert',  requestKind: 'DEFAULT' },
         { key: 'heavy',   label: 'Heavy',   modelName: 'heavy',   requestKind: 'DEFAULT' },
     ];
-    const API_ENDPOINT_STORAGE_KEY = 'grok-search-api-endpoint';
-    const CONVERSATION_ID_RE = /^[a-f0-9]+(?:-[a-f0-9]+)*$/i;
-    const MAX_ERROR_RESPONSE_LENGTH = 300;
-    const MAX_ENDPOINT_LENGTH = 2048;
-    const SEARCH_API_VERSION = '2.2.0';
-    const DEFAULT_API_CREDENTIALS = 'omit';
-    const API_POST_TIMEOUT_MS = 15000;
-
-    function hasValidConversationIdFormat(id) {
-        return typeof id === 'string' && CONVERSATION_ID_RE.test(id);
-    }
-
-    function truncateText(text, maxLength) {
-        return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
-    }
-
-    function isLoopbackHost(hostname) {
-        return hostname === 'localhost' || hostname === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
-    }
 
     // ========== 样式 ==========
 
@@ -320,16 +301,9 @@
         btnCSV.title = '导出 webSearchResults 为 CSV';
         btnCSV.addEventListener('click', exportAsCSV);
 
-        const btnAPI = document.createElement('button');
-        btnAPI.className = 'grok-monitor-btn grok-export-btn';
-        btnAPI.textContent = 'API';
-        btnAPI.title = '导出并 POST 到搜索 API';
-        btnAPI.addEventListener('click', exportAsAPI);
-
         btnGroup.appendChild(btnLabel);
         btnGroup.appendChild(btnJSON);
         btnGroup.appendChild(btnCSV);
-        btnGroup.appendChild(btnAPI);
         details.appendChild(btnGroup);
 
         document.body.appendChild(monitor);
@@ -369,12 +343,12 @@
     function getConversationId() {
         // 形式 1：独立对话 /c/{conversationId}
         const m1 = window.location.pathname.match(/^\/c\/([a-f0-9-]+)/i);
-        if (m1 && hasValidConversationIdFormat(m1[1])) return m1[1];
+        if (m1) return m1[1];
 
         // 形式 2：Project 内对话 /project/{projectId}?chat={conversationId}&rid=...
         if (/^\/project\//i.test(window.location.pathname)) {
             const chat = new URLSearchParams(window.location.search).get('chat');
-            if (hasValidConversationIdFormat(chat)) return chat;
+            if (chat && /^[a-f0-9-]+$/i.test(chat)) return chat;
         }
         return null;
     }
@@ -416,93 +390,6 @@
         return await resp.json();
     }
 
-    function normalizeSearchResult(sr) {
-        if (!sr || typeof sr !== 'object') return null;
-        const title = sr.title || sr.name || sr.headline || '';
-        const url = sr.url || sr.link || sr.href || '';
-        const preview = sr.preview || sr.snippet || sr.description || '';
-        const source = sr.site || sr.domain || sr.source || '';
-        const publishedTime = sr.publishedTime || sr.publishedDate || sr.time || '';
-        return {
-            title: String(title || ''),
-            url: String(url || ''),
-            preview: String(preview || ''),
-            source: String(source || ''),
-            publishedTime: String(publishedTime || ''),
-            raw: sr
-        };
-    }
-
-    function buildSearchApiPayload(result) {
-        const { convId, responseIds, allSearchResults } = result;
-        const items = [];
-        for (const item of allSearchResults) {
-            item.searchResults.forEach((sr, idx) => {
-                items.push({
-                    conversationId: convId,
-                    turn: item.turn,
-                    responseId: item.responseId,
-                    rank: idx + 1,
-                    ...sr
-                });
-            });
-        }
-        return {
-            conversationId: convId,
-            exportTime: new Date().toISOString(),
-            totalResponses: responseIds.length,
-            searchTurnCount: allSearchResults.length,
-            searchResultCount: items.length,
-            turns: allSearchResults.map(item => ({
-                turn: item.turn,
-                responseId: item.responseId,
-                searchResults: item.searchResults
-            })),
-            items
-        };
-    }
-
-    function normalizeApiEndpoint(endpoint) {
-        let url;
-        try {
-            url = new URL(endpoint);
-        } catch {
-            throw new Error('API Endpoint 不是合法 URL');
-        }
-        const isHttps = url.protocol === 'https:';
-        const isLocalHttp = url.protocol === 'http:' && isLoopbackHost(url.hostname.toLowerCase());
-        if (!isHttps && !isLocalHttp) {
-            throw new Error('API Endpoint 必须是 HTTPS（本地 localhost 可用 HTTP）');
-        }
-        return url.toString();
-    }
-
-    async function postSearchPayload(endpoint, payload, options = {}) {
-        const target = normalizeApiEndpoint(endpoint);
-        const credentials = options.credentials || DEFAULT_API_CREDENTIALS;
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), API_POST_TIMEOUT_MS);
-        let resp;
-        try {
-            resp = await fetch(target, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
-                credentials,
-                mode: 'cors',
-                signal: controller.signal
-            });
-        } finally {
-            clearTimeout(timer);
-        }
-        const text = await resp.text();
-        if (!resp.ok) {
-            const snippet = truncateText(text, MAX_ERROR_RESPONSE_LENGTH);
-            throw new Error(`API POST failed: ${resp.status} ${snippet}`);
-        }
-        return { status: resp.status, body: text };
-    }
-
     function downloadFile(content, filename, mimeType) {
         const blob = new Blob([content], { type: mimeType });
         const url = URL.createObjectURL(blob);
@@ -516,11 +403,10 @@
     }
 
     // 收集搜索结果的通用逻辑
-    async function gatherSearchResults(options = {}) {
-        const { conversationId = null, silent = false } = options;
-        const convId = conversationId || getConversationId();
+    async function gatherSearchResults() {
+        const convId = getConversationId();
         if (!convId) {
-            if (!silent) alert('请先打开一个对话（URL 需为 /c/{id} 或 /project/{id}?chat={id}）');
+            alert('请先打开一个对话（URL 需为 /c/{id} 或 /project/{id}?chat={id}）');
             return null;
         }
 
@@ -536,7 +422,7 @@
         }
 
         if (responseIds.length === 0) {
-            if (!silent) alert('未找到任何 response 节点');
+            alert('未找到任何 response 节点');
             return null;
         }
 
@@ -557,15 +443,10 @@
                 : null);
             if (!results) continue;
             const responseId = r.responseId || r.id || null;
-            const normalized = results
-                .map(normalizeSearchResult)
-                // Require URL so exports remain actionable.
-                .filter(sr => sr && sr.url);
             allSearchResults.push({
                 turn: turnMap.get(responseId) ?? null,
                 responseId,
-                webSearchResults: results,
-                searchResults: normalized
+                webSearchResults: results
             });
         }
 
@@ -573,7 +454,7 @@
         allSearchResults.sort((a, b) => (a.turn ?? Infinity) - (b.turn ?? Infinity));
 
         if (allSearchResults.length === 0) {
-            if (!silent) alert('此对话没有 webSearchResults 数据（可能不是搜索模式的对话）');
+            alert('此对话没有 webSearchResults 数据（可能不是搜索模式的对话）');
             return null;
         }
 
@@ -593,12 +474,13 @@
         try {
             const result = await gatherSearchResults();
             if (!result) return;
-            const payload = buildSearchApiPayload(result);
             const { convId, responseIds, allSearchResults } = result;
             const filename = `grok-search-${convId.slice(0, 8)}-${Date.now()}.json`;
             downloadFile(JSON.stringify({
-                ...payload,
-                // Backward compatibility with legacy export fields.
+                conversationId: convId,
+                exportTime: new Date().toISOString(),
+                totalResponses: responseIds.length,
+                searchResultCount: allSearchResults.length,
                 data: allSearchResults
             }, null, 2), filename, 'application/json');
         } catch (e) {
@@ -626,13 +508,13 @@
 
             const rows = [['turn', 'responseId', 'title', 'url', 'preview'].join(',')];
             for (const item of allSearchResults) {
-                for (const sr of item.searchResults) {
+                for (const sr of item.webSearchResults) {
                     rows.push([
                         escapeCsv(item.turn ?? ''),
                         escapeCsv(item.responseId ?? ''),
                         escapeCsv(sr.title),
                         escapeCsv(sr.url),
-                        escapeCsv(sr.preview)
+                        escapeCsv(sr.preview || sr.snippet || '')
                     ].join(','));
                 }
             }
@@ -647,45 +529,6 @@
         }
     }
 
-    async function exportAsAPI() {
-        setExportLoading(true);
-        try {
-            const result = await gatherSearchResults();
-            if (!result) return;
-            const lastEndpoint = localStorage.getItem(API_ENDPOINT_STORAGE_KEY) || '';
-            const endpoint = window.prompt('输入搜索 API Endpoint（POST JSON）', lastEndpoint || '');
-            if (!endpoint) return;
-            const target = endpoint.trim();
-            if (!target) return;
-            if (target.length > MAX_ENDPOINT_LENGTH) throw new Error(`API Endpoint 过长（>${MAX_ENDPOINT_LENGTH}）`);
-            localStorage.setItem(API_ENDPOINT_STORAGE_KEY, target);
-            const payload = buildSearchApiPayload(result);
-            const resp = await postSearchPayload(target, payload, { credentials: DEFAULT_API_CREDENTIALS });
-            alert(`已推送到 API：${resp.status}`);
-        } catch (e) {
-            console.error('Export API failed:', e);
-            alert('导出到 API 失败: ' + e.message);
-        } finally {
-            setExportLoading(false);
-        }
-    }
-
-    function exposeSearchAPI() {
-        window.GrokSearchAPI = {
-            version: SEARCH_API_VERSION,
-            getCurrentConversation: async () => gatherSearchResults({ silent: true }),
-            getConversationById: async (conversationId) => {
-                if (!hasValidConversationIdFormat(conversationId)) {
-                    throw new Error('Invalid conversation ID format: expected hexadecimal characters and hyphens');
-                }
-                return await gatherSearchResults({ conversationId, silent: true });
-            },
-            buildPayload: buildSearchApiPayload,
-            normalizeEndpoint: normalizeApiEndpoint,
-            postPayload: postSearchPayload
-        };
-    }
-
     // ========== 主循环 ==========
 
     async function tick() {
@@ -695,7 +538,6 @@
 
     function init() {
         createMonitor();
-        exposeSearchAPI();
         tick();
         setInterval(tick, 30000);
     }
