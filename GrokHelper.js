@@ -349,14 +349,15 @@
     // ========== 导出 webSearchResults ==========
 
     function getConversationId() {
+        const isValidConversationId = id => typeof id === 'string' && /^[a-f0-9]+(?:-[a-f0-9]+)*$/i.test(id);
         // 形式 1：独立对话 /c/{conversationId}
-        const m1 = window.location.pathname.match(/^\/c\/([a-f0-9-]+)/i);
-        if (m1) return m1[1];
+        const m1 = window.location.pathname.match(/^\/c\/([^/]+)/i);
+        if (m1 && isValidConversationId(m1[1])) return m1[1];
 
         // 形式 2：Project 内对话 /project/{projectId}?chat={conversationId}&rid=...
         if (/^\/project\//i.test(window.location.pathname)) {
             const chat = new URLSearchParams(window.location.search).get('chat');
-            if (chat && /^[a-f0-9-]+$/i.test(chat)) return chat;
+            if (isValidConversationId(chat)) return chat;
         }
         return null;
     }
@@ -453,7 +454,8 @@
         });
         const text = await resp.text();
         if (!resp.ok) {
-            throw new Error(`API POST failed: ${resp.status} ${text.slice(0, 300)}`);
+            const snippet = text.length > 300 ? `${text.slice(0, 300)}...` : text;
+            throw new Error(`API POST failed: ${resp.status} ${snippet}`);
         }
         return { status: resp.status, body: text };
     }
@@ -554,8 +556,7 @@
                 ...payload,
                 // 兼容旧版导出字段
                 data: allSearchResults,
-                legacySearchTurnCount: allSearchResults.length,
-                totalResponses: responseIds.length
+                legacySearchTurnCount: allSearchResults.length
             }, null, 2), filename, 'application/json');
         } catch (e) {
             console.error('Export JSON failed:', e);
@@ -609,7 +610,7 @@
             const result = await gatherSearchResults();
             if (!result) return;
             const lastEndpoint = localStorage.getItem(API_ENDPOINT_STORAGE_KEY) || '';
-            const endpoint = window.prompt('输入搜索 API Endpoint（POST JSON）', lastEndpoint || 'https://example.com/api/search');
+            const endpoint = window.prompt('输入搜索 API Endpoint（POST JSON）', lastEndpoint || '');
             if (!endpoint) return;
             const target = endpoint.trim();
             if (!target) return;
@@ -630,7 +631,7 @@
             version: '1.0.0',
             getCurrentConversation: async () => await gatherSearchResults({ silent: true }),
             getConversationById: async (conversationId) => {
-                if (!conversationId || !/^[a-f0-9-]+$/i.test(conversationId)) {
+                if (!conversationId || !/^[a-f0-9]+(?:-[a-f0-9]+)*$/i.test(conversationId)) {
                     throw new Error('invalid conversationId');
                 }
                 return await gatherSearchResults({ conversationId, silent: true });
