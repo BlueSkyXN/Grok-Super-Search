@@ -26,6 +26,7 @@
         { key: 'heavy',   label: 'Heavy',   modelName: 'heavy',   requestKind: 'DEFAULT' },
     ];
     const API_ENDPOINT_STORAGE_KEY = 'grok-search-api-endpoint';
+    const CONVERSATION_ID_RE = /^[a-f0-9]+(?:-[a-f0-9]+)*$/i;
 
     // ========== 样式 ==========
 
@@ -349,7 +350,7 @@
     // ========== 导出 webSearchResults ==========
 
     function getConversationId() {
-        const isValidConversationId = id => typeof id === 'string' && /^[a-f0-9]+(?:-[a-f0-9]+)*$/i.test(id);
+        const isValidConversationId = id => typeof id === 'string' && CONVERSATION_ID_RE.test(id);
         // 形式 1：独立对话 /c/{conversationId}
         const m1 = window.location.pathname.match(/^\/c\/([^/]+)/i);
         if (m1 && isValidConversationId(m1[1])) return m1[1];
@@ -445,12 +446,29 @@
         };
     }
 
-    async function postSearchPayload(endpoint, payload) {
-        const resp = await fetch(endpoint, {
+    function normalizeApiEndpoint(endpoint) {
+        let url;
+        try {
+            url = new URL(endpoint);
+        } catch {
+            throw new Error('API Endpoint 不是合法 URL');
+        }
+        const isHttps = url.protocol === 'https:';
+        const isLocalHttp = url.protocol === 'http:' && /^(localhost|127\.0\.0\.1)$/i.test(url.hostname);
+        if (!isHttps && !isLocalHttp) {
+            throw new Error('API Endpoint 必须是 HTTPS（本地 localhost 可用 HTTP）');
+        }
+        return url.toString();
+    }
+
+    async function postSearchPayload(endpoint, payload, options = {}) {
+        const target = normalizeApiEndpoint(endpoint);
+        const credentials = options.credentials || 'omit';
+        const resp = await fetch(target, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
-            credentials: 'omit'
+            credentials
         });
         const text = await resp.text();
         if (!resp.ok) {
@@ -555,8 +573,7 @@
             downloadFile(JSON.stringify({
                 ...payload,
                 // 兼容旧版导出字段
-                data: allSearchResults,
-                legacySearchTurnCount: allSearchResults.length
+                data: allSearchResults
             }, null, 2), filename, 'application/json');
         } catch (e) {
             console.error('Export JSON failed:', e);
@@ -616,7 +633,7 @@
             if (!target) return;
             localStorage.setItem(API_ENDPOINT_STORAGE_KEY, target);
             const payload = buildSearchApiPayload(result);
-            const resp = await postSearchPayload(target, payload);
+            const resp = await postSearchPayload(target, payload, { credentials: 'omit' });
             alert(`已推送到 API：${resp.status}`);
         } catch (e) {
             console.error('Export API failed:', e);
@@ -629,14 +646,15 @@
     function exposeSearchAPI() {
         window.GrokSearchAPI = {
             version: '1.0.0',
-            getCurrentConversation: async () => await gatherSearchResults({ silent: true }),
+            getCurrentConversation: async () => gatherSearchResults({ silent: true }),
             getConversationById: async (conversationId) => {
-                if (!conversationId || !/^[a-f0-9]+(?:-[a-f0-9]+)*$/i.test(conversationId)) {
+                if (!conversationId || !CONVERSATION_ID_RE.test(conversationId)) {
                     throw new Error('invalid conversationId');
                 }
                 return await gatherSearchResults({ conversationId, silent: true });
             },
             buildPayload: buildSearchApiPayload,
+            normalizeEndpoint: normalizeApiEndpoint,
             postPayload: postSearchPayload
         };
     }
