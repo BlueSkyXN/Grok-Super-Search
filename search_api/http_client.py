@@ -20,6 +20,9 @@ from .config import get_settings
 
 logger = logging.getLogger("grok_search")
 
+# 上游错误响应截断长度
+MAX_ERROR_BODY_LENGTH = 500
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Header 构造（提取自 grok2api: headers.py）
@@ -27,7 +30,7 @@ logger = logging.getLogger("grok_search")
 
 
 def _statsig_id() -> str:
-    """生成 x-statsig-id 指纹（同 grok2api）"""
+    """生成 x-statsig-id 指纹（对齐 grok2api 的 _statsig_id，模拟浏览器 JS 错误堆栈）"""
     if random.choice((True, False)):
         rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
         msg = f"e:TypeError: Cannot read properties of null (reading 'children['{rand}']')"
@@ -111,7 +114,7 @@ async def _httpx_stream(
             content=data,
         ) as response:
             if response.status_code != 200:
-                body = (await response.aread()).decode("utf-8", "replace")[:500]
+                body = (await response.aread()).decode("utf-8", "replace")[:MAX_ERROR_BODY_LENGTH]
                 raise GrokUpstreamError(response.status_code, body)
             async for line in response.aiter_lines():
                 yield line
@@ -148,7 +151,7 @@ async def _curl_cffi_stream(
         if response.status_code != 200:
             body = ""
             try:
-                body = response.content.decode("utf-8", "replace")[:500]
+                body = response.content.decode("utf-8", "replace")[:MAX_ERROR_BODY_LENGTH]
             except Exception:
                 pass
             raise GrokUpstreamError(response.status_code, body)
