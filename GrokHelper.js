@@ -28,8 +28,10 @@
     const API_ENDPOINT_STORAGE_KEY = 'grok-search-api-endpoint';
     const CONVERSATION_ID_RE = /^[a-f0-9]+(?:-[a-f0-9]+)*$/i;
     const MAX_ERROR_RESPONSE_LENGTH = 300;
+    const MAX_ENDPOINT_LENGTH = 2048;
     const SEARCH_API_VERSION = '2.2.0';
     const DEFAULT_API_CREDENTIALS = 'omit';
+    const API_POST_TIMEOUT_MS = 15000;
 
     function hasValidConversationIdFormat(id) {
         return typeof id === 'string' && CONVERSATION_ID_RE.test(id);
@@ -37,6 +39,10 @@
 
     function truncateText(text, maxLength) {
         return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+    }
+
+    function isLoopbackHost(hostname) {
+        return hostname === 'localhost' || hostname === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
     }
 
     // ========== 样式 ==========
@@ -362,7 +368,7 @@
 
     function getConversationId() {
         // 形式 1：独立对话 /c/{conversationId}
-        const m1 = window.location.pathname.match(/^\/c\/([^/]+)/i);
+        const m1 = window.location.pathname.match(/^\/c\/([a-f0-9-]+)/i);
         if (m1 && hasValidConversationIdFormat(m1[1])) return m1[1];
 
         // 形式 2：Project 内对话 /project/{projectId}?chat={conversationId}&rid=...
@@ -464,7 +470,7 @@
             throw new Error('API Endpoint 不是合法 URL');
         }
         const isHttps = url.protocol === 'https:';
-        const isLocalHttp = url.protocol === 'http:' && /^(localhost|127\.0\.0\.1)$/i.test(url.hostname);
+        const isLocalHttp = url.protocol === 'http:' && isLoopbackHost(url.hostname.toLowerCase());
         if (!isHttps && !isLocalHttp) {
             throw new Error('API Endpoint 必须是 HTTPS（本地 localhost 可用 HTTP）');
         }
@@ -474,12 +480,21 @@
     async function postSearchPayload(endpoint, payload, options = {}) {
         const target = normalizeApiEndpoint(endpoint);
         const credentials = options.credentials || DEFAULT_API_CREDENTIALS;
-        const resp = await fetch(target, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-            credentials
-        });
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), API_POST_TIMEOUT_MS);
+        let resp;
+        try {
+            resp = await fetch(target, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                credentials,
+                mode: 'cors',
+                signal: controller.signal
+            });
+        } finally {
+            clearTimeout(timer);
+        }
         const text = await resp.text();
         if (!resp.ok) {
             const snippet = truncateText(text, MAX_ERROR_RESPONSE_LENGTH);
@@ -544,8 +559,8 @@
             const responseId = r.responseId || r.id || null;
             const normalized = results
                 .map(normalizeSearchResult)
-                // Require URL or title so empty tool traces are not exported as search items.
-                .filter(sr => sr && (sr.url || sr.title));
+                // Require URL so exports remain actionable.
+                .filter(sr => sr && sr.url);
             allSearchResults.push({
                 turn: turnMap.get(responseId) ?? null,
                 responseId,
@@ -642,6 +657,7 @@
             if (!endpoint) return;
             const target = endpoint.trim();
             if (!target) return;
+            if (target.length > MAX_ENDPOINT_LENGTH) throw new Error(`API Endpoint 过长（>${MAX_ENDPOINT_LENGTH}）`);
             localStorage.setItem(API_ENDPOINT_STORAGE_KEY, target);
             const payload = buildSearchApiPayload(result);
             const resp = await postSearchPayload(target, payload, { credentials: DEFAULT_API_CREDENTIALS });
@@ -660,7 +676,7 @@
             getCurrentConversation: async () => gatherSearchResults({ silent: true }),
             getConversationById: async (conversationId) => {
                 if (!hasValidConversationIdFormat(conversationId)) {
-                    throw new Error('invalid conversationId');
+                    throw new Error('Invalid conversation ID format: expected hexadecimal characters and hyphens');
                 }
                 return await gatherSearchResults({ conversationId, silent: true });
             },
