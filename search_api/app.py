@@ -20,13 +20,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
-from .config import get_settings
-from .grok_search import execute_search, GrokUpstreamError
+from .config import get_settings, reload_settings
+from .grok_search import execute_search, query_rate_limits, GrokUpstreamError
 from .schemas import (
     BatchSearchRequest,
     BatchSearchResponse,
     ErrorResponse,
     HealthResponse,
+    PromptListResponse,
+    PromptTemplateInfo,
+    QuotaResponse,
     SearchRequest,
     SearchResponse,
     TokenStatusResponse,
@@ -35,7 +38,7 @@ from .token_pool import get_token_pool
 
 logger = logging.getLogger("grok_search")
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -90,6 +93,8 @@ async def lifespan(app: FastAPI):
     logger.info("📖 文档: http://%s:%d/docs", settings.host, settings.port)
     logger.info("🔧 HTTP 后端: %s", settings.http_backend)
     logger.info("🔄 默认模式: %s", settings.default_mode)
+    logger.info("📝 已加载 %d 个提示词模板", len(settings.prompt_templates))
+    logger.info("🎯 默认模板: %s", settings.default_prompt_id)
 
     yield  # 运行中
 
@@ -105,8 +110,8 @@ app = FastAPI(
     title="Grok Search API",
     description=(
         "从 grok2api 核心提取的独立搜索服务，将 Grok Web 的搜索能力封装为 REST API。\n\n"
-        "- 多 Token 号池管理（轮询 + 冷却）\n"
-        "- 预设提示词模板 + 搜索词拼装\n"
+        "- 多 Token 号池管理（轮询 + 冷却 + 额度查询）\n"
+        "- 可配置提示词模板系统（config.json）\n"
         "- 仅提取 webSearchResults，无视 AI 文字回答\n"
         "- 支持 httpx / curl_cffi 双后端\n"
         "- 无数据库，适合 HF Space / Docker 部署"
@@ -132,7 +137,6 @@ app.add_middleware(
 
 @app.exception_handler(GrokUpstreamError)
 async def grok_upstream_handler(request: Request, exc: GrokUpstreamError):
-    # 401/403 时自动禁用对应 Token
     detail = f"Grok upstream error: {exc.status_code}"
     if exc.body:
         detail += f" - {exc.body[:200]}"
@@ -152,7 +156,7 @@ async def unhandled_handler(request: Request, exc: Exception):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 路由
+# 核心路由
 # ═══════════════════════════════════════════════════════════════════
 
 
@@ -164,8 +168,11 @@ async def root():
         "endpoints": {
             "search": "POST /v1/search",
             "batch_search": "POST /v1/search/batch",
+            "prompts": "GET /v1/prompts",
             "health": "GET /health",
+            "quota": "GET /admin/quota",
             "pool_status": "GET /admin/pool",
+            "config_reload": "POST /admin/config/reload",
             "docs": "GET /docs",
         },
     }
@@ -182,6 +189,27 @@ async def health():
     )
 
 
+@app.get("/v1/prompts", response_model=PromptListResponse)
+async def list_prompts():
+    """列出所有可用的提示词模板"""
+    settings = get_settings()
+    templates = [
+        PromptTemplateInfo(
+            id=t.id,
+            name=t.name,
+            description=t.description,
+            mode=t.mode,
+            template_preview=t.template[:200] + ("..." if len(t.template) > 200 else ""),
+        )
+        for t in settings.prompt_templates
+    ]
+    return PromptListResponse(
+        total=len(templates),
+        default_prompt_id=settings.default_prompt_id,
+        templates=templates,
+    )
+
+
 @app.post("/v1/search", response_model=SearchResponse)
 async def search(
     body: SearchRequest,
@@ -192,6 +220,8 @@ async def search(
 
     接收搜索关键词，拼装预设提示词后发给 Grok，
     从 SSE 流中提取 webSearchResults 并返回。
+
+    可通过 prompt_id 选择不同的提示词模板（见 GET /v1/prompts）。
     """
     _verify_auth(authorization)
 
@@ -201,12 +231,13 @@ async def search(
         raise HTTPException(503, "无可用 Token（全部禁用或冷却中）")
 
     try:
-        result = await execute_search(body.query, slot, body.mode)
+        result = await execute_search(
+            body.query, slot, body.mode, body.prompt_id,
+        )
         await pool.release(slot, error=False)
         return SearchResponse(**result)
     except GrokUpstreamError as e:
         await pool.release(slot, error=True)
-        # 401/403 自动禁用 Token
         if e.status_code in (401, 403):
             await pool.disable(slot, f"HTTP {e.status_code}")
             logger.warning(
@@ -225,9 +256,7 @@ async def search_batch(
     body: BatchSearchRequest,
     authorization: Optional[str] = Header(None),
 ):
-    """
-    批量搜索接口 — 并发执行多个搜索查询。
-    """
+    """批量搜索接口 — 并发执行多个搜索查询。"""
     _verify_auth(authorization)
 
     pool = get_token_pool()
@@ -240,6 +269,7 @@ async def search_batch(
                 return {
                     "query": query,
                     "mode": body.mode,
+                    "prompt_id": body.prompt_id or get_settings().default_prompt_id,
                     "search_queries": [],
                     "search_results": [],
                     "total_results": 0,
@@ -247,7 +277,9 @@ async def search_batch(
                     "error": "no_available_token",
                 }
             try:
-                result = await execute_search(query, slot, body.mode)
+                result = await execute_search(
+                    query, slot, body.mode, body.prompt_id,
+                )
                 await pool.release(slot, error=False)
                 return result
             except GrokUpstreamError as e:
@@ -257,6 +289,7 @@ async def search_batch(
                 return {
                     "query": query,
                     "mode": body.mode,
+                    "prompt_id": body.prompt_id or get_settings().default_prompt_id,
                     "search_queries": [],
                     "search_results": [],
                     "total_results": 0,
@@ -268,6 +301,7 @@ async def search_batch(
                 return {
                     "query": query,
                     "mode": body.mode,
+                    "prompt_id": body.prompt_id or get_settings().default_prompt_id,
                     "search_queries": [],
                     "search_results": [],
                     "total_results": 0,
@@ -287,12 +321,14 @@ async def search_batch(
     )
 
 
-# ── Admin 路由 ──
+# ═══════════════════════════════════════════════════════════════════
+# Admin 路由
+# ═══════════════════════════════════════════════════════════════════
 
 
 @app.get("/admin/pool", response_model=TokenStatusResponse)
 async def pool_status(authorization: Optional[str] = Header(None)):
-    """查看 Token 池状态"""
+    """查看 Token 池状态（运行时内存数据）"""
     _verify_auth(authorization)
     pool = get_token_pool()
     return TokenStatusResponse(
@@ -309,3 +345,61 @@ async def pool_enable_all(authorization: Optional[str] = Header(None)):
     pool = get_token_pool()
     count = await pool.enable_all()
     return {"enabled": count, "total": pool.total}
+
+
+@app.get("/admin/quota", response_model=QuotaResponse)
+async def check_quota(
+    token_index: int | None = None,
+    authorization: Optional[str] = Header(None),
+):
+    """
+    查询 Grok 账号额度（移植自 GrokHelper.js 的 rate-limits 查询）。
+
+    可指定 token_index 查询特定 Token，否则自动选一个可用的。
+    返回 Fast/Expert/Heavy 三个模型池的剩余额度。
+    """
+    _verify_auth(authorization)
+
+    pool = get_token_pool()
+
+    if token_index is not None:
+        slots = pool.status()
+        if token_index < 0 or token_index >= len(slots):
+            raise HTTPException(400, f"无效的 token_index: {token_index}")
+        # 获取指定 slot
+        slot = pool._slots[token_index]
+        if slot.disabled:
+            raise HTTPException(400, f"Token #{token_index} 已禁用")
+    else:
+        slot = await pool.acquire()
+        if slot is None:
+            raise HTTPException(503, "无可用 Token")
+
+    try:
+        result = await query_rate_limits(slot)
+        if token_index is None:
+            await pool.release(slot, error=False)
+        return QuotaResponse(**result)
+    except Exception as e:
+        if token_index is None:
+            await pool.release(slot, error=True)
+        raise HTTPException(502, f"额度查询失败: {e}")
+
+
+@app.post("/admin/config/reload")
+async def config_reload(authorization: Optional[str] = Header(None)):
+    """
+    热重载配置文件（config.json）。
+
+    运行时无需重启即可更新提示词模板、冷却参数等。
+    注意：Token 列表变更需要重启服务。
+    """
+    _verify_auth(authorization)
+    settings = reload_settings()
+    return {
+        "status": "ok",
+        "templates_loaded": len(settings.prompt_templates),
+        "default_mode": settings.default_mode,
+        "default_prompt_id": settings.default_prompt_id,
+        "cooldown": settings.cooldown,
+    }

@@ -1,5 +1,5 @@
 """
-Grok 搜索核心 — SSE 流解析 + webSearchResults 提取。
+Grok 搜索核心 — SSE 流解析 + webSearchResults 提取 + 额度查询。
 
 核心逻辑来自两个来源：
 1. grok2api 的 xai_chat.py（classify_line + StreamAdapter.feed）
@@ -15,13 +15,14 @@ from typing import Any
 import orjson
 
 from .config import get_settings
-from .http_client import grok_stream_request, GrokUpstreamError
+from .http_client import grok_stream_request, grok_post_json, GrokUpstreamError
 from .token_pool import TokenSlot
 
 logger = logging.getLogger("grok_search")
 
-# Grok 新建对话端点
+# Grok 端点
 GROK_CHAT_URL = "https://grok.com/rest/app-chat/conversations/new"
+GROK_RATE_LIMITS_URL = "https://grok.com/rest/rate-limits"
 
 # 搜索模式映射
 MODE_MAP = {
@@ -39,13 +40,19 @@ MODE_MAP = {
 # ═══════════════════════════════════════════════════════════════════
 
 
-def build_search_message(query: str) -> str:
-    """用预设提示词模板拼装搜索消息"""
+def build_search_message(query: str, prompt_id: str | None = None) -> str:
+    """用提示词模板拼装搜索消息"""
     settings = get_settings()
-    return settings.search_prompt_template.format(query=query)
+    template = settings.get_template(prompt_id)
+    return template.render(query)
 
 
-def build_chat_payload(message: str, mode: str = "auto") -> dict[str, Any]:
+def build_chat_payload(
+    message: str,
+    mode: str = "auto",
+    *,
+    prompt_id: str | None = None,
+) -> dict[str, Any]:
     """
     构造 Grok 对话请求体。
 
@@ -53,6 +60,12 @@ def build_chat_payload(message: str, mode: str = "auto") -> dict[str, Any]:
     关键差异：disableSearch=False 确保触发网页搜索。
     """
     settings = get_settings()
+
+    # 如果指定了 prompt_id，优先使用模板推荐的模式
+    if prompt_id:
+        template = settings.get_template(prompt_id)
+        mode = template.mode or mode
+
     mode_id = MODE_MAP.get(mode.lower(), "auto")
 
     return {
@@ -209,6 +222,7 @@ async def execute_search(
     query: str,
     token_slot: TokenSlot,
     mode: str = "auto",
+    prompt_id: str | None = None,
 ) -> dict[str, Any]:
     """
     执行一次 Grok 搜索。
@@ -222,8 +236,8 @@ async def execute_search(
     返回值只包含搜索结果，不包含 AI 文字回答
     （这是与 grok2api 的核心差异）。
     """
-    message = build_search_message(query)
-    payload = build_chat_payload(message, mode)
+    message = build_search_message(query, prompt_id)
+    payload = build_chat_payload(message, mode, prompt_id=prompt_id)
     payload_bytes = orjson.dumps(payload)
 
     all_results: list[dict] = []
@@ -271,8 +285,97 @@ async def execute_search(
     return {
         "query": query,
         "mode": mode,
+        "prompt_id": prompt_id or get_settings().default_prompt_id,
         "search_queries": search_queries,
         "search_results": all_results,
         "total_results": len(all_results),
         "total_search_queries": len(search_queries),
     }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 额度查询（移植自 GrokHelper.js 的 fetchRateLimit）
+# ═══════════════════════════════════════════════════════════════════
+
+
+# GrokHelper.js 查询的三个模型池
+RATE_LIMIT_QUERIES = [
+    {"key": "fast", "label": "Fast", "modelName": "fast", "requestKind": "DEFAULT"},
+    {"key": "expert", "label": "Expert", "modelName": "expert", "requestKind": "DEFAULT"},
+    {"key": "heavy", "label": "Heavy", "modelName": "heavy", "requestKind": "DEFAULT"},
+]
+
+
+async def query_rate_limits(
+    token_slot: TokenSlot,
+) -> dict[str, Any]:
+    """
+    查询 Grok 账号的额度信息。
+
+    移植自 GrokHelper.js 的 fetchRateLimit + fetchAll，
+    调用 Grok 的 /rest/rate-limits 接口。
+    """
+    results = {}
+
+    for q in RATE_LIMIT_QUERIES:
+        payload = {
+            "requestKind": q["requestKind"],
+            "modelName": q["modelName"],
+        }
+        try:
+            data = await grok_post_json(
+                GROK_RATE_LIMITS_URL,
+                token_slot.token,
+                orjson.dumps(payload),
+            )
+            results[q["key"]] = _parse_rate_limit(data, q["label"])
+        except GrokUpstreamError as e:
+            results[q["key"]] = {
+                "label": q["label"],
+                "error": f"HTTP {e.status_code}",
+            }
+        except Exception as e:
+            results[q["key"]] = {
+                "label": q["label"],
+                "error": str(e),
+            }
+
+    # 计算总剩余（同 GrokHelper.js 的 extractRemaining）
+    total_remaining = 0
+    for v in results.values():
+        total_remaining += v.get("remaining", 0)
+
+    return {
+        "token_prefix": token_slot.token[:8] + "...",
+        "total_remaining": total_remaining,
+        "limits": results,
+    }
+
+
+def _parse_rate_limit(data: dict, label: str) -> dict[str, Any]:
+    """解析单个 rate-limit 响应（同 GrokHelper.js 的 formatResult + extractRemaining）"""
+    result: dict[str, Any] = {"label": label}
+
+    has_high = data.get("highEffortRateLimits") is not None
+    has_low = data.get("lowEffortRateLimits") is not None
+
+    if has_high and has_low:
+        # Auto 双路模式
+        h = data["highEffortRateLimits"]
+        l = data["lowEffortRateLimits"]
+        result["high_remaining"] = h.get("remainingQueries", 0)
+        result["high_wait_seconds"] = h.get("waitTimeSeconds", 0)
+        result["low_remaining"] = l.get("remainingQueries", 0)
+        result["low_wait_seconds"] = l.get("waitTimeSeconds", 0)
+        result["remaining"] = max(result["high_remaining"], 0) + max(result["low_remaining"], 0)
+    else:
+        # 单路模式
+        result["remaining"] = max(data.get("remainingQueries", 0), 0)
+        result["total"] = data.get("totalQueries", 0)
+        result["wait_seconds"] = data.get("waitTimeSeconds", 0)
+        if "remainingTokens" in data:
+            result["remaining_tokens"] = data["remainingTokens"]
+            result["total_tokens"] = data.get("totalTokens", 0)
+
+    result["window_seconds"] = data.get("windowSizeSeconds", 0)
+    return result

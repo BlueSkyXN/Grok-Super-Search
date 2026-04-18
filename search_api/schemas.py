@@ -12,6 +12,10 @@ class SearchRequest(BaseModel):
         default="auto",
         description="搜索模式: auto / fast / expert / deepsearch",
     )
+    prompt_id: str | None = Field(
+        default=None,
+        description="提示词模板 ID（见 /admin/prompts 或 config.json）",
+    )
 
 
 class BatchSearchRequest(BaseModel):
@@ -20,6 +24,7 @@ class BatchSearchRequest(BaseModel):
         ..., min_length=1, max_length=20, description="搜索关键词列表"
     )
     mode: str = Field(default="auto", description="搜索模式")
+    prompt_id: str | None = Field(default=None, description="提示词模板 ID")
     concurrency: int = Field(default=3, ge=1, le=5, description="并发数")
 
 
@@ -34,6 +39,7 @@ class SearchResponse(BaseModel):
     """搜索响应"""
     query: str
     mode: str
+    prompt_id: str = "default"
     search_queries: list[str] = Field(
         default_factory=list,
         description="Grok 实际执行的搜索词",
@@ -66,6 +72,29 @@ class TokenStatusResponse(BaseModel):
     total: int
     available: int
     slots: list[dict]
+
+
+class PromptTemplateInfo(BaseModel):
+    """提示词模板信息"""
+    id: str
+    name: str
+    description: str = ""
+    mode: str = "auto"
+    template_preview: str = ""  # 前 200 字符
+
+
+class PromptListResponse(BaseModel):
+    """提示词模板列表"""
+    total: int
+    default_prompt_id: str
+    templates: list[PromptTemplateInfo]
+
+
+class QuotaResponse(BaseModel):
+    """额度查询响应"""
+    token_prefix: str
+    total_remaining: int
+    limits: dict
 
 
 class ErrorResponse(BaseModel):

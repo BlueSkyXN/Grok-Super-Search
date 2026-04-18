@@ -199,3 +199,37 @@ async def grok_stream_request(
             url, headers, payload, settings.timeout, settings.proxy_url
         ):
             yield line
+
+
+async def grok_post_json(
+    url: str,
+    sso_token: str,
+    payload: bytes,
+) -> dict:
+    """
+    向 Grok 发起普通 POST 请求，返回 JSON。
+    用于非流式接口（如 /rest/rate-limits）。
+    """
+    import httpx
+
+    settings = get_settings()
+    headers = build_grok_headers(sso_token)
+
+    transport_kwargs: dict[str, Any] = {}
+    if settings.proxy_url:
+        transport_kwargs["proxy"] = settings.proxy_url
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(30.0, connect=10.0),
+        follow_redirects=True,
+        **transport_kwargs,
+    ) as client:
+        response = await client.post(
+            url,
+            headers=headers,
+            content=payload,
+        )
+        if response.status_code != 200:
+            body = response.text[:MAX_ERROR_BODY_LENGTH]
+            raise GrokUpstreamError(response.status_code, body)
+        return response.json()
