@@ -8,8 +8,8 @@
 // @grant        GM_addStyle
 // @supportURL   https://github.com/BlueSkyXN/Grok-Super-Search
 // @homepageURL  https://github.com/BlueSkyXN/Grok-Super-Search
-// @downloadURL https://github.com/BlueSkyXN/Grok-Super-Search/blob/main/GrokHelper.js
-// @updateURL https://github.com/BlueSkyXN/Grok-Super-Search/blob/main/GrokHelper.js
+// @downloadURL  https://raw.githubusercontent.com/BlueSkyXN/Grok-Super-Search/refs/heads/main/GrokHelper.js
+// @updateURL    https://raw.githubusercontent.com/BlueSkyXN/Grok-Super-Search/refs/heads/main/GrokHelper.js
 // ==/UserScript==
 
 (function() {
