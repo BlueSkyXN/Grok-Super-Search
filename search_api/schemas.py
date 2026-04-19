@@ -28,13 +28,6 @@ class BatchSearchRequest(BaseModel):
     concurrency: int = Field(default=3, ge=1, le=5, description="并发数")
 
 
-class SearchResultItem(BaseModel):
-    """单条搜索结果"""
-    title: str = ""
-    url: str = ""
-    preview: str = ""
-
-
 class SearchResponse(BaseModel):
     """搜索响应"""
     query: str

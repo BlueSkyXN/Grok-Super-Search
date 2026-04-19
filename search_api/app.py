@@ -10,6 +10,7 @@ FastAPI 应用 — 对齐 SouWen 的 server/app.py 结构。
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -63,7 +64,7 @@ def _verify_auth(authorization: Optional[str]) -> None:
         return  # 未配置则不鉴权
     if not authorization:
         raise HTTPException(401, "Missing Authorization header")
-    token = authorization.replace("Bearer ", "").strip()
+    token = re.sub(r"(?i)^bearer\s+", "", authorization).strip()
     if token != settings.api_key:
         raise HTTPException(403, "Invalid API key")
 
@@ -87,6 +88,11 @@ async def lifespan(app: FastAPI):
         logger.warning("⚠️  GROK_SSO_TOKENS 未配置，请在 .env 中设置")
     else:
         logger.info("✅ 已加载 %d 个 SSO Token", pool.total)
+
+    if not settings.api_key:
+        logger.warning(
+            "⚠️  API_KEY 未配置，所有端点（含 /admin/*）不鉴权，生产环境请在 .env 中设置 API_KEY"
+        )
 
     logger.info("🔍 Grok Search API v%s", VERSION)
     logger.info("📖 文档: http://%s:%d/docs", settings.host, settings.port)

@@ -201,6 +201,57 @@ async def grok_stream_request(
             yield line
 
 
+async def _httpx_post_json(
+    url: str,
+    headers: dict[str, str],
+    data: bytes,
+    timeout: float,
+    proxy: str,
+) -> dict:
+    import httpx
+
+    transport_kwargs: dict[str, Any] = {}
+    if proxy:
+        transport_kwargs["proxy"] = proxy
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout, connect=10.0),
+        follow_redirects=True,
+        **transport_kwargs,
+    ) as client:
+        response = await client.post(url, headers=headers, content=data)
+        if response.status_code != 200:
+            body = response.text[:MAX_ERROR_BODY_LENGTH]
+            raise GrokUpstreamError(response.status_code, body)
+        return response.json()
+
+
+async def _curl_cffi_post_json(
+    url: str,
+    headers: dict[str, str],
+    data: bytes,
+    timeout: float,
+    proxy: str,
+) -> dict:
+    from curl_cffi.requests import AsyncSession
+
+    ver = _chrome_version(get_settings().user_agent)
+    session_kwargs: dict[str, Any] = {"impersonate": f"chrome{ver}"}
+    if proxy:
+        session_kwargs["proxies"] = {"http": proxy, "https": proxy}
+
+    async with AsyncSession(**session_kwargs) as session:
+        response = await session.post(url, headers=headers, data=data, timeout=timeout)
+        if response.status_code != 200:
+            body = ""
+            try:
+                body = response.content.decode("utf-8", "replace")[:MAX_ERROR_BODY_LENGTH]
+            except Exception:
+                pass
+            raise GrokUpstreamError(response.status_code, body)
+        return response.json()
+
+
 async def grok_post_json(
     url: str,
     sso_token: str,
@@ -208,28 +259,18 @@ async def grok_post_json(
 ) -> dict:
     """
     向 Grok 发起普通 POST 请求，返回 JSON。
-    用于非流式接口（如 /rest/rate-limits）。
+    根据配置自动选择 httpx 或 curl_cffi 后端，与流式请求保持一致。
     """
-    import httpx
-
     settings = get_settings()
     headers = build_grok_headers(sso_token)
 
-    transport_kwargs: dict[str, Any] = {}
-    if settings.proxy_url:
-        transport_kwargs["proxy"] = settings.proxy_url
-
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(30.0, connect=10.0),
-        follow_redirects=True,
-        **transport_kwargs,
-    ) as client:
-        response = await client.post(
-            url,
-            headers=headers,
-            content=payload,
+    if settings.http_backend.lower() == "curl_cffi":
+        logger.debug("using curl_cffi backend (post_json)")
+        return await _curl_cffi_post_json(
+            url, headers, payload, 30.0, settings.proxy_url
         )
-        if response.status_code != 200:
-            body = response.text[:MAX_ERROR_BODY_LENGTH]
-            raise GrokUpstreamError(response.status_code, body)
-        return response.json()
+    else:
+        logger.debug("using httpx backend (post_json)")
+        return await _httpx_post_json(
+            url, headers, payload, 30.0, settings.proxy_url
+        )
