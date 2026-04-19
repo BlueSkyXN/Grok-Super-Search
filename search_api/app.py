@@ -10,7 +10,6 @@ FastAPI 应用 — 对齐 SouWen 的 server/app.py 结构。
 
 import asyncio
 import logging
-import time
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -242,7 +241,7 @@ async def search(
             await pool.disable(slot, f"HTTP {e.status_code}")
             logger.warning(
                 "Token %s... 已禁用: %s",
-                slot.token[:8],
+                slot.token[:4],
                 e.status_code,
             )
         raise

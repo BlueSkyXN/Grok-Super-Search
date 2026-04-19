@@ -14,7 +14,7 @@ class SearchRequest(BaseModel):
     )
     prompt_id: str | None = Field(
         default=None,
-        description="提示词模板 ID（见 /admin/prompts 或 config.json）",
+        description="提示词模板 ID（见 /v1/prompts 或 config.json）",
     )
 
 
@@ -50,6 +50,10 @@ class SearchResponse(BaseModel):
     )
     total_results: int = 0
     total_search_queries: int = 0
+    error: str | None = Field(
+        default=None,
+        description="错误信息（仅批量搜索时部分失败会填充）",
+    )
 
 
 class BatchSearchResponse(BaseModel):
