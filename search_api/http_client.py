@@ -5,7 +5,11 @@ HTTP 传输层 — 对齐 SouWen 的 http_client.py 和 grok2api 的 transport/h
 - httpx（默认，轻量，SouWen 主用）
 - curl_cffi（可选，TLS 指纹模拟，grok2api 主用）
 
-所有请求都通过 GrokHttpClient 统一调度。
+增强特性（参考 SouWen）：
+- 浏览器指纹轮换（fingerprint.py）
+- curl_cffi 自动降级到 httpx
+- WARP 代理自动集成
+- 代理池支持
 """
 
 import base64
@@ -22,6 +26,18 @@ logger = logging.getLogger("grok_search")
 
 # 上游错误响应截断长度
 MAX_ERROR_BODY_LENGTH = 500
+
+# curl_cffi 可用性检测（参考 SouWen 的可选依赖模式）
+try:
+    from curl_cffi.requests import AsyncSession as CurlAsyncSession  # noqa: F401
+    _HAS_CURL_CFFI = True
+except ImportError:
+    _HAS_CURL_CFFI = False
+
+
+def has_curl_cffi() -> bool:
+    """检查 curl_cffi 是否可用"""
+    return _HAS_CURL_CFFI
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -49,6 +65,10 @@ def build_grok_headers(sso_token: str) -> dict[str, str]:
     """
     构造 Grok 请求头。
     对齐 grok2api 的 build_http_headers，包含完整的浏览器指纹。
+
+    增强（参考 SouWen）：
+    - 指纹轮换模式：每次请求使用随机浏览器指纹，增加反爬规避能力
+    - 固定指纹模式：使用配置的 User-Agent
     """
     settings = get_settings()
     tok = sso_token[4:] if sso_token.startswith("sso=") else sso_token
@@ -56,7 +76,22 @@ def build_grok_headers(sso_token: str) -> dict[str, str]:
     if settings.cf_clearance:
         cookie += f"; cf_clearance={settings.cf_clearance}"
 
-    ver = _chrome_version(settings.user_agent)
+    # 指纹轮换（参考 SouWen 的 BrowserFingerprint）
+    if settings.fingerprint_rotation:
+        from .fingerprint import get_random_fingerprint
+        fp = get_random_fingerprint()
+        ua = fp.user_agent
+        sec_ch_ua = fp.sec_ch_ua
+    else:
+        ua = settings.user_agent
+        ver = _chrome_version(ua)
+        sec_ch_ua = (
+            f'"Google Chrome";v="{ver}", '
+            f'"Chromium";v="{ver}", '
+            '"Not(A:Brand";v="24"'
+        )
+
+    ver = _chrome_version(ua)
     return {
         "Accept": "*/*",
         "Accept-Encoding": "gzip, deflate, br, zstd",
@@ -68,15 +103,11 @@ def build_grok_headers(sso_token: str) -> dict[str, str]:
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-origin",
-        "Sec-Ch-Ua": (
-            f'"Google Chrome";v="{ver}", '
-            f'"Chromium";v="{ver}", '
-            '"Not(A:Brand";v="24"'
-        ),
+        "Sec-Ch-Ua": sec_ch_ua,
         "Sec-Ch-Ua-Mobile": "?0",
         "Sec-Ch-Ua-Model": "",
         "Sec-Ch-Ua-Platform": '"Windows"',
-        "User-Agent": settings.user_agent,
+        "User-Agent": ua,
         "Cookie": cookie,
         "x-statsig-id": _statsig_id(),
         "x-xai-request-id": str(uuid.uuid4()),
@@ -132,11 +163,24 @@ async def _curl_cffi_stream(
     timeout: float,
     proxy: str,
 ) -> AsyncIterator[str]:
-    """使用 curl_cffi 发起 SSE 流式请求（浏览器指纹模拟）"""
+    """使用 curl_cffi 发起 SSE 流式请求（浏览器指纹模拟）
+
+    增强（参考 SouWen）：
+    - 使用 BrowserFingerprint 的 impersonate 参数，而非手动拼接版本号
+    - 指纹轮换模式下每次请求使用不同的 TLS 指纹
+    """
     from curl_cffi.requests import AsyncSession
 
-    ver = _chrome_version(get_settings().user_agent)
-    session_kwargs: dict[str, Any] = {"impersonate": f"chrome{ver}"}
+    settings = get_settings()
+    if settings.fingerprint_rotation:
+        from .fingerprint import get_random_fingerprint
+        fp = get_random_fingerprint()
+        impersonate = fp.impersonate
+    else:
+        ver = _chrome_version(settings.user_agent)
+        impersonate = f"chrome{ver}"
+
+    session_kwargs: dict[str, Any] = {"impersonate": impersonate}
     if proxy:
         session_kwargs["proxies"] = {"http": proxy, "https": proxy}
 
@@ -181,23 +225,28 @@ async def grok_stream_request(
     向 Grok 发起 SSE 流式请求。
 
     根据配置自动选择 httpx 或 curl_cffi 后端。
-    对齐 grok2api 的 post_stream + SouWen 的 http_client。
+    增强（参考 SouWen）：
+    - 使用 settings.get_proxy() 支持 WARP + 代理池
+    - 使用 settings.resolve_http_backend() 支持 auto 模式
+    - curl_cffi 不可用时自动降级到 httpx
     """
     settings = get_settings()
     headers = build_grok_headers(sso_token)
+    proxy = settings.get_proxy()
 
-    backend = settings.http_backend.lower()
+    backend = settings.resolve_http_backend()
+    if backend == "curl_cffi":
+        if not _HAS_CURL_CFFI:
+            logger.warning("curl_cffi 不可用，降级到 httpx")
+            backend = "httpx"
+
     if backend == "curl_cffi":
         logger.debug("using curl_cffi backend")
-        async for line in _curl_cffi_stream(
-            url, headers, payload, settings.timeout, settings.proxy_url
-        ):
+        async for line in _curl_cffi_stream(url, headers, payload, settings.timeout, proxy):
             yield line
     else:
         logger.debug("using httpx backend")
-        async for line in _httpx_stream(
-            url, headers, payload, settings.timeout, settings.proxy_url
-        ):
+        async for line in _httpx_stream(url, headers, payload, settings.timeout, proxy):
             yield line
 
 
@@ -235,8 +284,16 @@ async def _curl_cffi_post_json(
 ) -> dict:
     from curl_cffi.requests import AsyncSession
 
-    ver = _chrome_version(get_settings().user_agent)
-    session_kwargs: dict[str, Any] = {"impersonate": f"chrome{ver}"}
+    settings = get_settings()
+    if settings.fingerprint_rotation:
+        from .fingerprint import get_random_fingerprint
+        fp = get_random_fingerprint()
+        impersonate = fp.impersonate
+    else:
+        ver = _chrome_version(settings.user_agent)
+        impersonate = f"chrome{ver}"
+
+    session_kwargs: dict[str, Any] = {"impersonate": impersonate}
     if proxy:
         session_kwargs["proxies"] = {"http": proxy, "https": proxy}
 
@@ -259,18 +316,21 @@ async def grok_post_json(
 ) -> dict:
     """
     向 Grok 发起普通 POST 请求，返回 JSON。
-    根据配置自动选择 httpx 或 curl_cffi 后端，与流式请求保持一致。
+    根据配置自动选择 httpx 或 curl_cffi 后端。
+    支持 WARP + 代理池 + curl_cffi 自动降级。
     """
     settings = get_settings()
     headers = build_grok_headers(sso_token)
+    proxy = settings.get_proxy()
 
-    if settings.http_backend.lower() == "curl_cffi":
+    backend = settings.resolve_http_backend()
+    if backend == "curl_cffi" and not _HAS_CURL_CFFI:
+        logger.warning("curl_cffi 不可用，降级到 httpx (post_json)")
+        backend = "httpx"
+
+    if backend == "curl_cffi":
         logger.debug("using curl_cffi backend (post_json)")
-        return await _curl_cffi_post_json(
-            url, headers, payload, 30.0, settings.proxy_url
-        )
+        return await _curl_cffi_post_json(url, headers, payload, 30.0, proxy)
     else:
         logger.debug("using httpx backend (post_json)")
-        return await _httpx_post_json(
-            url, headers, payload, 30.0, settings.proxy_url
-        )
+        return await _httpx_post_json(url, headers, payload, 30.0, proxy)
