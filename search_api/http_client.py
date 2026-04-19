@@ -29,8 +29,9 @@ MAX_ERROR_BODY_LENGTH = 500
 
 # curl_cffi 可用性检测（参考 SouWen 的可选依赖模式）
 try:
-    from curl_cffi.requests import AsyncSession as CurlAsyncSession  # noqa: F401
+    from curl_cffi.requests import AsyncSession as _CurlAsyncSession  # noqa: F401
     _HAS_CURL_CFFI = True
+    del _CurlAsyncSession
 except ImportError:
     _HAS_CURL_CFFI = False
 

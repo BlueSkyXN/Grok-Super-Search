@@ -533,7 +533,9 @@ async def warp_enable(
     warp = get_warp_manager()
     result = await warp.enable(body.mode, body.socks_port, body.endpoint)
     if not result.get("ok"):
-        raise HTTPException(500, result.get("error", "WARP 启用失败"))
+        error_msg = result.get("error", "WARP 启用失败")
+        logger.error("WARP 启用失败: %s", error_msg)
+        raise HTTPException(500, "WARP 启用失败，请查看服务端日志")
     return result
 
 
@@ -549,5 +551,7 @@ async def warp_disable(authorization: Optional[str] = Header(None)):
     warp = get_warp_manager()
     result = await warp.disable()
     if not result.get("ok"):
-        raise HTTPException(500, result.get("error", "WARP 禁用失败"))
+        error_msg = result.get("error", "WARP 禁用失败")
+        logger.error("WARP 禁用失败: %s", error_msg)
+        raise HTTPException(500, "WARP 禁用失败，请查看服务端日志")
     return result
