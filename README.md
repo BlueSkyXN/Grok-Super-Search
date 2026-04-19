@@ -41,13 +41,18 @@
 - **多 Token 号池**：轮询 + 冷却 + 自动禁用 + 额度查询
 - **提示词模板**：内置 6 种深度搜索模板，支持 `config.json` 自定义
 - **无数据库**：纯内存状态，适合 HF Space / Docker 单实例部署
-- **双 HTTP 后端**：默认 `httpx`，可切换 `curl_cffi`（TLS 指纹模拟）
+- **双 HTTP 后端**：默认 `httpx`，可切换 `curl_cffi`（TLS 指纹模拟），自动降级
+- **Cloudflare WARP 代理**：wireproxy（用户态）+ kernel（WireGuard）双模式
+- **浏览器指纹轮换**：每次请求随机 Chrome/Edge/Safari 指纹
+- **代理池**：多代理随机选取（HTTP/SOCKS5/SOCKS4）
+- **SouWen 兼容**：可直接作为 [SouWen](https://github.com/BlueSkyXN/SouWen) 搜索平台数据源
 
 ### 快速开始
 
 ```bash
 cd search_api
 pip install -r requirements.txt
+# 可选：pip install curl_cffi  # TLS 指纹模拟
 cp .env.example .env
 # 编辑 .env，填入 Grok SSO Token
 python -m search_api
@@ -77,6 +82,13 @@ curl http://localhost:8000/v1/prompts
 
 # 查询额度
 curl http://localhost:8000/admin/quota
+
+# 系统信息（HTTP 后端、代理、WARP 状态）
+curl http://localhost:8000/admin/system
+
+# WARP 代理管理
+curl http://localhost:8000/admin/warp/status
+curl -X POST http://localhost:8000/admin/warp/enable -H "Content-Type: application/json" -d '{"mode": "auto"}'
 ```
 
 ### Docker 部署
@@ -87,7 +99,7 @@ docker build -t grok-search-api .
 docker run -p 8000:8000 --env-file .env grok-search-api
 ```
 
-详细文档见 [search_api/README.md](search_api/README.md)。
+详细文档见 [search_api/README.md](search_api/README.md)。完整 API 文档（输入/输出语法、SouWen 集成指南）见 [search_api/API_DOCS.md](search_api/API_DOCS.md)。
 
 ---
 
