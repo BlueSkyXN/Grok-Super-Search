@@ -32,7 +32,10 @@ from .schemas import (
     QuotaResponse,
     SearchRequest,
     SearchResponse,
+    SystemInfoResponse,
     TokenStatusResponse,
+    WarpEnableRequest,
+    WarpStatusResponse,
 )
 from .token_pool import get_token_pool
 
@@ -94,14 +97,57 @@ async def lifespan(app: FastAPI):
             "⚠️  API_KEY 未配置，所有端点（含 /admin/*）不鉴权，生产环境请在 .env 中设置 API_KEY"
         )
 
+    # curl_cffi 可用性检测
+    from .http_client import has_curl_cffi
+    backend = settings.resolve_http_backend()
+    logger.info("🔧 HTTP 后端: %s (配置: %s, curl_cffi: %s)",
+                backend, settings.http_backend,
+                "可用" if has_curl_cffi() else "不可用")
+    if settings.fingerprint_rotation:
+        logger.info("🎭 浏览器指纹轮换: 已启用")
+
+    # WARP 代理初始化
+    if settings.warp_enabled:
+        from .warp import get_warp_manager
+        warp = get_warp_manager()
+        await warp.reconcile()
+        if warp.get_status()["status"] != "enabled":
+            logger.info("🔄 正在启动 WARP 代理 (模式: %s)...", settings.warp_mode)
+            result = await warp.enable(
+                settings.warp_mode,
+                settings.warp_socks_port,
+                settings.warp_endpoint or None,
+            )
+            if result.get("ok"):
+                logger.info("✅ WARP 代理已启用 (模式: %s, IP: %s)",
+                            result.get("mode"), result.get("ip"))
+            else:
+                logger.warning("⚠️  WARP 代理启用失败: %s", result.get("error"))
+    else:
+        logger.info("🔒 WARP 代理: 未启用")
+
+    # 代理信息
+    proxy = settings.get_proxy()
+    if proxy:
+        logger.info("🌐 代理: %s", proxy)
+    if settings.proxy_pool:
+        logger.info("🌐 代理池: %d 个代理", len(settings.proxy_pool))
+
     logger.info("🔍 Grok Search API v%s", VERSION)
     logger.info("📖 文档: http://%s:%d/docs", settings.host, settings.port)
-    logger.info("🔧 HTTP 后端: %s", settings.http_backend)
     logger.info("🔄 默认模式: %s", settings.default_mode)
     logger.info("📝 已加载 %d 个提示词模板", len(settings.prompt_templates))
     logger.info("🎯 默认模板: %s", settings.default_prompt_id)
 
     yield  # 运行中
+
+    # 关闭 WARP
+    if settings.warp_enabled:
+        from .warp import get_warp_manager
+        warp = get_warp_manager()
+        if warp.get_status()["status"] == "enabled":
+            await warp.disable()
+            logger.info("🔒 WARP 代理已关闭")
 
     logger.info("🛑 Grok Search API 关闭")
 
@@ -118,8 +164,12 @@ app = FastAPI(
         "- 多 Token 号池管理（轮询 + 冷却 + 额度查询）\n"
         "- 可配置提示词模板系统（config.json）\n"
         "- 仅提取 webSearchResults，无视 AI 文字回答\n"
-        "- 支持 httpx / curl_cffi 双后端\n"
-        "- 无数据库，适合 HF Space / Docker 部署"
+        "- 支持 httpx / curl_cffi 双后端（自动降级）\n"
+        "- Cloudflare WARP 代理集成（wireproxy + kernel 双模式）\n"
+        "- 浏览器指纹轮换（TLS 指纹 + UA + Sec-CH-UA）\n"
+        "- 代理池支持（多代理随机选取）\n"
+        "- 无数据库，适合 HF Space / Docker 部署\n"
+        "- SouWen 兼容接口设计，可直接接入 SouWen 搜索平台"
     ),
     version=VERSION,
     lifespan=lifespan,
@@ -175,8 +225,12 @@ async def root():
             "batch_search": "POST /v1/search/batch",
             "prompts": "GET /v1/prompts",
             "health": "GET /health",
+            "system_info": "GET /admin/system",
             "quota": "GET /admin/quota",
             "pool_status": "GET /admin/pool",
+            "warp_status": "GET /admin/warp/status",
+            "warp_enable": "POST /admin/warp/enable",
+            "warp_disable": "POST /admin/warp/disable",
             "config_reload": "POST /admin/config/reload",
             "docs": "GET /docs",
         },
@@ -406,4 +460,98 @@ async def config_reload(authorization: Optional[str] = Header(None)):
         "default_mode": settings.default_mode,
         "default_prompt_id": settings.default_prompt_id,
         "cooldown": settings.cooldown,
+        "http_backend": settings.resolve_http_backend(),
+        "warp_enabled": settings.warp_enabled,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# WARP 管理路由（参考 SouWen 的 server/routes/warp.py）
+# ═══════════════════════════════════════════════════════════════════
+
+
+@app.get("/admin/system", response_model=SystemInfoResponse)
+async def system_info(authorization: Optional[str] = Header(None)):
+    """
+    系统信息 — 含 HTTP 后端、代理配置、WARP 状态、curl_cffi 可用性。
+
+    SouWen 接入时可通过此接口检查服务能力。
+    """
+    _verify_auth(authorization)
+    settings = get_settings()
+    pool = get_token_pool()
+
+    from .http_client import has_curl_cffi
+    from .warp import get_warp_manager
+    warp = get_warp_manager()
+
+    return SystemInfoResponse(
+        version=VERSION,
+        http_backend=settings.resolve_http_backend(),
+        http_backend_config=settings.http_backend,
+        curl_cffi_available=has_curl_cffi(),
+        fingerprint_rotation=settings.fingerprint_rotation,
+        proxy=settings.get_proxy(),
+        proxy_pool_size=len(settings.proxy_pool),
+        warp_status=warp.get_status()["status"],
+        tokens_total=pool.total,
+        tokens_available=pool.available,
+    )
+
+
+@app.get("/admin/warp/status", response_model=WarpStatusResponse)
+async def warp_status(authorization: Optional[str] = Header(None)):
+    """
+    查看 WARP 代理状态。
+
+    返回当前 WARP 的运行状态、模式、IP、可用模式等信息。
+    """
+    _verify_auth(authorization)
+    from .warp import get_warp_manager
+    warp = get_warp_manager()
+    status = warp.get_status()
+    return WarpStatusResponse(**status)
+
+
+@app.post("/admin/warp/enable")
+async def warp_enable(
+    body: WarpEnableRequest = WarpEnableRequest(),
+    authorization: Optional[str] = Header(None),
+):
+    """
+    启用 WARP 代理。
+
+    支持三种模式：
+    - **auto**: 自动检测最优模式（kernel > wireproxy）
+    - **wireproxy**: 用户态，无需 root / NET_ADMIN
+    - **kernel**: 内核 WireGuard + microsocks，高性能
+
+    启用后，所有 Grok 请求将自动通过 WARP SOCKS5 代理发送。
+    """
+    _verify_auth(authorization)
+    from .warp import get_warp_manager
+    warp = get_warp_manager()
+    result = await warp.enable(body.mode, body.socks_port, body.endpoint)
+    if not result.get("ok"):
+        error_msg = result.get("error", "WARP 启用失败")
+        logger.error("WARP 启用失败: %s", error_msg)
+        raise HTTPException(500, "WARP 启用失败，请查看服务端日志")
+    return result
+
+
+@app.post("/admin/warp/disable")
+async def warp_disable(authorization: Optional[str] = Header(None)):
+    """
+    禁用 WARP 代理。
+
+    终止 WARP 进程并清理网络配置。
+    """
+    _verify_auth(authorization)
+    from .warp import get_warp_manager
+    warp = get_warp_manager()
+    result = await warp.disable()
+    if not result.get("ok"):
+        error_msg = result.get("error", "WARP 禁用失败")
+        logger.error("WARP 禁用失败: %s", error_msg)
+        raise HTTPException(500, "WARP 禁用失败，请查看服务端日志")
+    return result

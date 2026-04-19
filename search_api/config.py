@@ -1,18 +1,25 @@
 """
 配置管理 — JSON 配置文件 + 环境变量 + .env，无数据库依赖。
 
-设计原则（对齐用户需求）：
+设计原则（对齐用户需求 + SouWen 架构）：
 - 持久配置（提示词模板、冷却参数、模式等）→ config.json 文件
 - 敏感数据（Token、API Key）→ 环境变量 / .env
 - 运行时状态（Token 用量、冷却计时器）→ 内存
+
+新增（参考 SouWen）：
+- WARP 代理配置（warp_enabled, warp_mode, warp_socks_port, warp_endpoint）
+- 代理池（proxy_pool，多代理随机选取）
+- curl_cffi 增强指纹轮换（fingerprint_rotation）
 """
 
 import json
 import logging
 import os
+import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -22,6 +29,9 @@ logger = logging.getLogger("grok_search")
 
 # 配置文件默认路径
 CONFIG_FILE = os.getenv("CONFIG_FILE", "config.json")
+
+# 允许的代理协议 — 参考 SouWen 的 _ALLOWED_PROXY_SCHEMES
+_ALLOWED_PROXY_SCHEMES = {"http", "https", "socks5", "socks5h", "socks4", "socks4a"}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -130,6 +140,20 @@ BUILTIN_TEMPLATES: list[dict] = [
 # ═══════════════════════════════════════════════════════════════════
 
 
+def _validate_proxy_url(url: str | None) -> str | None:
+    """校验代理 URL 合法性 — 参考 SouWen"""
+    if not url or not isinstance(url, str):
+        return None
+    url = url.strip()
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if parsed.scheme not in _ALLOWED_PROXY_SCHEMES:
+        logger.warning("不允许的代理协议 %r (允许: %s)，已忽略", parsed.scheme, _ALLOWED_PROXY_SCHEMES)
+        return None
+    return url
+
+
 @dataclass
 class Settings:
     """
@@ -165,7 +189,15 @@ class Settings:
 
     # ── 网络 ──
     proxy_url: str = ""
-    http_backend: str = "httpx"
+    proxy_pool: list[str] = field(default_factory=list)  # 多代理池（随机选取）
+    http_backend: str = "httpx"     # httpx | curl_cffi | auto
+    fingerprint_rotation: bool = True  # 是否启用指纹轮换（curl_cffi 时生效）
+
+    # ── WARP 代理 ──
+    warp_enabled: bool = False
+    warp_mode: str = "auto"         # auto | wireproxy | kernel
+    warp_socks_port: int = 1080
+    warp_endpoint: str = ""         # 自定义 WARP endpoint（可选）
 
     # ── 提示词模板（从配置文件加载）──
     prompt_templates: list[PromptTemplate] = field(default_factory=list)
@@ -184,6 +216,39 @@ class Settings:
             template="请搜索以下内容：\n\n{query}",
         )
 
+    def get_proxy(self) -> str:
+        """获取代理 URL — 参考 SouWen 的 get_proxy()
+
+        优先级：WARP > 代理池随机 > 单一代理
+        """
+        # 1. WARP 代理
+        if self.warp_enabled:
+            from .warp import get_warp_manager
+            warp_url = get_warp_manager().get_socks_url()
+            if warp_url:
+                return warp_url
+
+        # 2. 代理池随机选取
+        if self.proxy_pool:
+            return random.choice(self.proxy_pool)
+
+        # 3. 单一代理
+        return self.proxy_url
+
+    def resolve_http_backend(self) -> str:
+        """解析实际使用的 HTTP 后端
+
+        auto 模式下：优先 curl_cffi（如已安装），否则 httpx
+        """
+        backend = self.http_backend.lower()
+        if backend == "auto":
+            try:
+                import curl_cffi  # noqa: F401
+                return "curl_cffi"
+            except ImportError:
+                return "httpx"
+        return backend
+
     @classmethod
     def from_env_and_file(cls) -> "Settings":
         """
@@ -200,6 +265,13 @@ class Settings:
         # 3. 合并（环境变量 > 配置文件 > 默认值）
         templates_raw = file_cfg.get("prompt_templates", BUILTIN_TEMPLATES)
         templates = [PromptTemplate(**t) for t in templates_raw]
+
+        # 代理池解析
+        proxy_pool_raw = file_cfg.get("proxy_pool", [])
+        proxy_pool_env = os.getenv("PROXY_POOL", "")
+        if proxy_pool_env:
+            proxy_pool_raw = [p.strip() for p in proxy_pool_env.split(",") if p.strip()]
+        proxy_pool = [p for p in (_validate_proxy_url(p) for p in proxy_pool_raw) if p]
 
         return cls(
             host=os.getenv("HOST", file_cfg.get("host", "0.0.0.0")),
@@ -228,10 +300,34 @@ class Settings:
                 "COOLDOWN",
                 file_cfg.get("cooldown", 3),
             )),
-            proxy_url=os.getenv("PROXY_URL", file_cfg.get("proxy_url", "")),
+            proxy_url=_validate_proxy_url(
+                os.getenv("PROXY_URL", file_cfg.get("proxy_url", ""))
+            ) or "",
+            proxy_pool=proxy_pool,
             http_backend=os.getenv(
                 "HTTP_BACKEND",
                 file_cfg.get("http_backend", "httpx"),
+            ),
+            fingerprint_rotation=_parse_bool(
+                os.getenv("FINGERPRINT_ROTATION"),
+                file_cfg.get("fingerprint_rotation", True),
+            ),
+            # WARP 配置（兼容 SouWen 不带前缀的 WARP_* 环境变量）
+            warp_enabled=_parse_bool(
+                os.getenv("WARP_ENABLED"),
+                file_cfg.get("warp_enabled", False),
+            ),
+            warp_mode=os.getenv(
+                "WARP_MODE",
+                file_cfg.get("warp_mode", "auto"),
+            ),
+            warp_socks_port=int(os.getenv(
+                "WARP_SOCKS_PORT",
+                file_cfg.get("warp_socks_port", 1080),
+            )),
+            warp_endpoint=os.getenv(
+                "WARP_ENDPOINT",
+                file_cfg.get("warp_endpoint", ""),
             ),
             prompt_templates=templates,
         )
@@ -277,6 +373,12 @@ def _default_config() -> dict[str, Any]:
         "timeout": 120,
         "cooldown": 3,
         "http_backend": "httpx",
+        "fingerprint_rotation": True,
+        "proxy_pool": [],
+        "warp_enabled": False,
+        "warp_mode": "auto",
+        "warp_socks_port": 1080,
+        "warp_endpoint": "",
         "prompt_templates": BUILTIN_TEMPLATES,
     }
 

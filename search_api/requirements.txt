@@ -4,3 +4,8 @@ uvicorn[standard]>=0.34.0
 orjson>=3.11.6
 pydantic>=2.0,<3.0
 python-dotenv>=1.0.0
+
+# ── 可选依赖（TLS 指纹模拟）──
+# 安装后 HTTP_BACKEND 可设为 curl_cffi 或 auto
+# pip install curl_cffi
+# curl_cffi>=0.7.0
